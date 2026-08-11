@@ -46,9 +46,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG_NAME="${GITHUB_REF_NAME}"
-          gh release create "$TAG_NAME" \
-            --title "$TAG_NAME" \
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
             --generate-notes \
-            release/*.dmg release/*.zip || \
-          gh release upload --clobber "$TAG_NAME" release/*.dmg release/*.zip
+            release/*.dmg || \
+          gh release upload --clobber "${GITHUB_REF_NAME}" release/*.dmg
