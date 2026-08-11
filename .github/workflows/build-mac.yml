@@ -26,7 +26,7 @@ jobs:
         run: npm ci
 
       - name: Build macOS DMG
-        run: npm run dist:mac
+        run: npm run dist:mac -- --publish never
         env:
           # 未配置签名时允许打未签名包，用户安装时需在「隐私与安全性」中允许
           CSC_IDENTITY_AUTO_DISCOVERY: false
