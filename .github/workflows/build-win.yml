@@ -48,9 +48,11 @@ jobs:
         shell: bash
         run: |
           FILES="release/*.exe release/latest.yml release/*.blockmap"
-          gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 && \
-            gh release upload --clobber "${GITHUB_REF_NAME}" $FILES || \
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload --clobber "${GITHUB_REF_NAME}" $FILES
+          else
             gh release create "${GITHUB_REF_NAME}" \
               --title "${GITHUB_REF_NAME}" \
-              --generate-notes \
-              --clobber $FILES
+              --generate-notes $FILES || \
+              gh release upload --clobber "${GITHUB_REF_NAME}" $FILES
+          fi
