@@ -2,14 +2,19 @@ import {
   app,
   BrowserWindow,
   Menu,
+  nativeImage,
   shell
 } from 'electron'
+import { existsSync } from 'fs'
 import { join } from 'path'
 import { registerIpc } from './ipc'
 import { createTray, rebuildTrayMenu } from './tray'
-import { createProvider } from './store'
+import { createProvider, loadStore } from './store'
 import { parseDeepLink } from '../shared/url'
 import type { AppId } from '../shared/types'
+import { stopCodexProxy } from './codex/proxy'
+import { launchMcpService } from './mcp/launcher'
+import { initUpdater } from './update'
 
 let mainWindow: BrowserWindow | null = null
 let pendingDeepLink: string | null = null
@@ -33,14 +38,30 @@ function getMainWindow(): BrowserWindow | null {
   return mainWindow
 }
 
+function resolveAppIcon(): Electron.NativeImage | undefined {
+  // 窗口/任务栏图标优先用 icon.png(圆角+科技蓝+适配LOGO), 兜底旧 tray.png
+  const candidates = [
+    join(__dirname, '../../resources/icon.png'),
+    join(__dirname, '../../resources/tray.png')
+  ]
+  for (const p of candidates) {
+    if (!existsSync(p)) continue
+    const img = nativeImage.createFromPath(p)
+    if (!img.isEmpty()) return img
+  }
+  return undefined
+}
+
 function createWindow(): void {
+  const icon = resolveAppIcon()
   mainWindow = new BrowserWindow({
     width: 960,
     height: 680,
     minWidth: 800,
     minHeight: 560,
     show: false,
-    title: '大算头适配器',
+    title: `大算头适配器 v${app.getVersion()}`,
+    ...(icon ? { icon } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -97,7 +118,7 @@ function handleDeepLink(url: string): void {
   }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   Menu.setApplicationMenu(null)
 
   if (process.defaultApp) {
@@ -113,6 +134,24 @@ app.whenReady().then(() => {
   registerIpc(getMainWindow)
   createWindow()
   createTray(getMainWindow)
+  initUpdater(getMainWindow)
+  // 自动更新已关闭：不自动联网检查，仅在用户点击左下角 ↻ 时手动检查
+
+  // 自动启动已启用的 MCP 服务
+  const store = loadStore()
+  console.log(`[MCP] Store loaded: ${store.mcpServices.length} services`)
+  for (const svc of store.mcpServices) {
+    console.log(`[MCP] Service: ${svc.id}, enabled=${svc.enabled}, type=${svc.type}`)
+    if (svc.enabled && svc.type === 'video-generation') {
+      console.log(`[MCP] Auto-starting ${svc.id}...`)
+      const result = await launchMcpService(svc)
+      if (result.ok) {
+        console.log(`[MCP] ${svc.id} started on port ${result.port}`)
+      } else {
+        console.error(`[MCP] ${svc.id} start failed: ${result.error}`)
+      }
+    }
+  }
 
   const fromArgv = process.argv.find((a) => a.startsWith('dstadapter://'))
   if (fromArgv) handleDeepLink(fromArgv)
@@ -126,6 +165,7 @@ app.whenReady().then(() => {
 
 app.on('before-quit', () => {
   ;(app as typeof app & { isQuitting?: boolean }).isQuitting = true
+  void stopCodexProxy()
 })
 
 app.on('window-all-closed', () => {

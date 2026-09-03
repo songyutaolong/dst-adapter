@@ -173,6 +173,30 @@ export const DEFAULT_SETTINGS: AppSettings = {
   codexEnhancements: true
 }
 
+/** 应用自动更新状态（electron-updater 状态机的精简映射） */
+export type UpdateStatus =
+  | 'idle'
+  | 'checking'
+  | 'available'
+  | 'downloading'
+  | 'downloaded'
+  | 'up-to-date'
+  | 'error'
+  | 'unsupported'
+
+export interface UpdateState {
+  status: UpdateStatus
+  /** 远端可用版本（available / downloading / downloaded 时存在） */
+  version?: string
+  currentVersion: string
+  /** 下载进度 0-100 */
+  percent?: number
+  error?: string
+  isPackaged: boolean
+  /** 是否支持自动更新（Windows 仅 NSIS 安装版；macOS 需 zip + 签名） */
+  canUpdate: boolean
+}
+
 export const APP_META: Record<
   AppId,
   { name: string; implemented: boolean; downloadUrl?: string }
@@ -184,7 +208,7 @@ export const APP_META: Record<
   },
   codex: {
     name: 'Codex',
-    implemented: true,
+    implemented: false,
     downloadUrl: 'https://openai.com/zh-Hans-CN/codex/'
   },
   cursor: {

@@ -1,10 +1,18 @@
 {
   "name": "dst-adapter",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "大算头适配器 — 通用 AI 服务商管理与本机客户端一键接入",
   "main": "out/main/index.js",
   "author": "大算头",
   "license": "MIT",
+  "publish": [
+    {
+      "provider": "github",
+      "owner": "songyutaolong",
+      "repo": "dst-adapter",
+      "releaseType": "release"
+    }
+  ],
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
@@ -15,6 +23,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.node.json"
   },
   "dependencies": {
+    "electron-updater": "^6.8.9",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
@@ -36,9 +45,17 @@
       "output": "release"
     },
     "files": [
-      "out/**/*"
+      "out/**/*",
+      "resources/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "resources",
+        "to": "resources"
+      }
     ],
     "win": {
+      "icon": "resources/icon.ico",
       "target": [
         "nsis",
         "portable"
@@ -48,6 +65,12 @@
       "target": [
         {
           "target": "dmg",
+          "arch": [
+            "universal"
+          ]
+        },
+        {
+          "target": "zip",
           "arch": [
             "universal"
           ]

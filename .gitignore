@@ -2,7 +2,12 @@ node_modules
 dist
 out
 release
+.npm-cache
 *.log
+*.tsbuildinfo
 .DS_Store
 .env
 .env.*
+tmp-*.cjs
+tmp-*.mjs
+tmp-*.js

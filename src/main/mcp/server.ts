@@ -15,7 +15,7 @@ import {
  *   - POST /            → JSON-RPC 2.0 调用（initialize / tools/list / tools/call / ping）
  * - 工具：
  *   - image_generation 文生图（模型 ID 由请求参数 model 决定）
- *   - image_editing    图生图/编辑（输入图片 Base64 + 编辑指令）
+ *   - image_editing    图生图/编辑（输入图片 Base64 + 编辑指令，支持多参考图：image 可传 string 或多张 string[]）
  *   - video_generation 文生视频（提交任务，返回 task_id；支持 doubao-seedance-2.0）
  *   - video_from_image 图生视频（提交任务，返回 task_id）
  *   - video_task_query 查询视频生成任务状态（单次查询，不轮询；轮询节奏由调用方控制）
@@ -153,6 +153,9 @@ async function generateImage(
   }
   const size = params?.size
   if (typeof size === 'string' && size.trim()) body.size = size.trim()
+  // quality：仅白名单取值，缺省/非法值回退 medium
+  const quality = params?.quality
+  body.quality = typeof quality === 'string' && ['low', 'medium', 'high'].includes(quality) ? quality : 'medium'
 
   const endpoint = `${service.baseUrl.replace(/\/+$/, '')}/v1/images/generations`
   const resp = await fetch(endpoint, {
@@ -200,38 +203,56 @@ function decodeImageParam(image: string): DecodedImage {
   return { buffer: ab, mime, filename: `image.${ext}` }
 }
 
-/** 调用 Gemini 原生 API 进行图生图/编辑 */
-async function editImageGemini(
-  service: McpService,
-  model: string,
-  prompt: string,
-  imageBuffer: ArrayBuffer,
-  imageMime: string
-): Promise<unknown> {
-  const endpoint = `${service.baseUrl.replace(/\/+$/, '')}/v1beta/models/${model}:generateContent`
-  
-  // 将 ArrayBuffer 转为 base64
-  const bytes = new Uint8Array(imageBuffer)
+/** 解析一个或多个输入图片参数：支持单张 string 或多张 string[]（多参考图）。 */
+function decodeImagesParam(imageParam: unknown): DecodedImage[] {
+  const rawList = Array.isArray(imageParam)
+    ? imageParam
+    : typeof imageParam === 'string'
+      ? [imageParam]
+      : []
+  if (rawList.length === 0) {
+    throw { code: -32602, message: '缺少参数 image（输入图片 Base64，支持单张 string 或多张 string[]）' } as JsonRpcError
+  }
+  return rawList.map(v => {
+    if (typeof v !== 'string') {
+      throw { code: -32602, message: '参数 image 的每一项必须是 Base64 字符串' } as JsonRpcError
+    }
+    return decodeImageParam(v)
+  })
+}
+
+/** ArrayBuffer → Base64（Gemini inline_data 需要）。 */
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer)
   let binary = ''
   for (let i = 0; i < bytes.length; i++) {
     binary += String.fromCharCode(bytes[i])
   }
-  const b64 = btoa(binary)
+  return btoa(binary)
+}
+
+/** 调用 Gemini 原生 API 进行图生图/编辑（支持多张输入图） */
+async function editImageGemini(
+  service: McpService,
+  model: string,
+  prompt: string,
+  images: DecodedImage[]
+): Promise<unknown> {
+  const endpoint = `${service.baseUrl.replace(/\/+$/, '')}/v1beta/models/${model}:generateContent`
+
+  // parts 中依次挂载多张输入图，最后是编辑指令文本
+  const parts: Array<Record<string, unknown>> = images.map(img => ({
+    inline_data: {
+      mime_type: img.mime,
+      data: arrayBufferToBase64(img.buffer)
+    }
+  }))
+  parts.push({ text: prompt })
 
   const body = {
     contents: [
       {
-        parts: [
-          {
-            inline_data: {
-              mime_type: imageMime,
-              data: b64
-            }
-          },
-          {
-            text: prompt
-          }
-        ]
+        parts
       }
     ],
     generationConfig: {
@@ -287,28 +308,29 @@ async function editImage(
   if (!prompt) {
     throw { code: -32602, message: '缺少参数 prompt（编辑指令）' } as JsonRpcError
   }
-  const imageParam = typeof params?.image === 'string' ? params.image : ''
-  if (!imageParam) {
-    throw { code: -32602, message: '缺少参数 image（输入图片 Base64）' } as JsonRpcError
-  }
-  const { buffer, mime, filename } = decodeImageParam(imageParam)
+  const images = decodeImagesParam(params?.image)
 
   const model = pickModel(service, params)
 
   // Gemini 模型走原生 API
   if (isGeminiModel(model)) {
-    return editImageGemini(service, model, prompt, buffer, mime)
+    return editImageGemini(service, model, prompt, images)
   }
 
-  // 其他模型走 OpenAI 兼容 API
+  // 其他模型走 OpenAI 兼容 API（images/edits 支持多 image 字段）
   const fd = new FormData()
   fd.append('model', model)
   fd.append('prompt', prompt)
-  fd.append('image', new Blob([buffer], { type: mime }), filename)
+  for (const img of images) {
+    fd.append('image', new Blob([img.buffer], { type: img.mime }), img.filename)
+  }
   const size = params?.size
   if (typeof size === 'string' && size.trim()) fd.append('size', size.trim())
   const n = params?.n
   if (typeof n === 'number') fd.append('n', String(n))
+  // quality：仅白名单取值，缺省/非法值回退 medium
+  const quality = params?.quality
+  fd.append('quality', typeof quality === 'string' && ['low', 'medium', 'high'].includes(quality) ? quality : 'medium')
 
   const endpoint = `${service.baseUrl.replace(/\/+$/, '')}/v1/images/edits`
   const resp = await fetch(endpoint, {
@@ -383,51 +405,55 @@ async function generateVideo(
     prompt
   }
 
-  // 可选参数：resolution
+  // 可选参数统一放入 metadata：resolution
+  const metadata: Record<string, unknown> = {}
+
   const resolution = params?.resolution
   if (typeof resolution === 'string' && resolution.trim()) {
-    body.resolution = resolution.trim()
+    metadata.resolution = resolution.trim()
   }
 
-  // 可选参数：duration（合法性校验：4-15 整数或 -1）
-  const duration = params?.duration
-  if (typeof duration === 'number') {
-    const durInt = Math.floor(duration)
-    if (durInt !== -1 && (durInt < 4 || durInt > 15)) {
-      throw { code: -32602, message: 'duration 必须为 4-15 的整数，或 -1（模型自动选择时长）' } as JsonRpcError
+  // 可选参数：duration（兼容旧参数名 seconds；合法性校验：4-15 整数或 -1）
+  const seconds = params?.seconds ?? params?.duration
+  if (typeof seconds === 'number') {
+    const secInt = Math.floor(seconds)
+    if (secInt !== -1 && (secInt < 4 || secInt > 15)) {
+      throw { code: -32602, message: 'seconds/duration 必须为 4-15 的整数，或 -1（模型自动选择时长）' } as JsonRpcError
     }
-    body.duration = durInt
+    metadata.duration = secInt
   }
 
   // 可选参数：ratio
   const ratio = params?.ratio
   if (typeof ratio === 'string' && ratio.trim()) {
-    body.ratio = ratio.trim()
+    metadata.ratio = ratio.trim()
   }
 
   // 可选参数：fps
   const fps = params?.fps
   if (typeof fps === 'number' && (fps === 24 || fps === 60)) {
-    body.fps = fps
+    metadata.fps = fps
   }
 
   // 可选参数：generate_audio（兼容旧参数名 audio）
   const generateAudio = params?.generate_audio ?? params?.audio
   if (typeof generateAudio === 'boolean') {
-    body.generate_audio = generateAudio
+    metadata.generate_audio = generateAudio
   }
 
   // 可选参数：seed
   const seed = params?.seed
   if (typeof seed === 'number' && Number.isInteger(seed)) {
-    body.seed = seed
+    metadata.seed = seed
   }
 
   // 可选参数：watermark
   const watermark = params?.watermark
   if (typeof watermark === 'boolean') {
-    body.watermark = watermark
+    metadata.watermark = watermark
   }
+
+  body.metadata = metadata
 
   // 提交任务
   const endpoint = `${service.baseUrl.replace(/\/+$/, '')}/v1/video/generations`
@@ -525,59 +551,63 @@ async function generateVideoFromImage(
   }
 
   const model = pickVideoModel(service, params)
-  const body: Record<string, unknown> = { model, prompt, content }
+  // content 与可选参数统一放入 metadata
+  const metadata: Record<string, unknown> = { content }
+  const body: Record<string, unknown> = { model, prompt }
 
   // 可选参数：resolution
   const resolution = params?.resolution
   if (typeof resolution === 'string' && resolution.trim()) {
-    body.resolution = resolution.trim()
+    metadata.resolution = resolution.trim()
   }
 
-  // 可选参数：duration（合法性校验：4-15 整数或 -1）
-  const duration = params?.duration
-  if (typeof duration === 'number') {
-    const durInt = Math.floor(duration)
-    if (durInt !== -1 && (durInt < 4 || durInt > 15)) {
-      throw { code: -32602, message: 'duration 必须为 4-15 的整数，或 -1（模型自动选择时长）' } as JsonRpcError
+  // 可选参数：duration（兼容旧参数名 seconds；合法性校验：4-15 整数或 -1）
+  const seconds = params?.seconds ?? params?.duration
+  if (typeof seconds === 'number') {
+    const secInt = Math.floor(seconds)
+    if (secInt !== -1 && (secInt < 4 || secInt > 15)) {
+      throw { code: -32602, message: 'seconds/duration 必须为 4-15 的整数，或 -1（模型自动选择时长）' } as JsonRpcError
     }
-    body.duration = durInt
+    metadata.duration = secInt
   }
 
   // 可选参数：ratio
   const ratio = params?.ratio
   if (typeof ratio === 'string' && ratio.trim()) {
-    body.ratio = ratio.trim()
+    metadata.ratio = ratio.trim()
   }
 
   // 可选参数：fps
   const fps = params?.fps
   if (typeof fps === 'number' && (fps === 24 || fps === 60)) {
-    body.fps = fps
+    metadata.fps = fps
   }
 
   // 可选参数：generate_audio（兼容旧参数名 audio）
   const generateAudio = params?.generate_audio ?? params?.audio
   if (typeof generateAudio === 'boolean') {
-    body.generate_audio = generateAudio
+    metadata.generate_audio = generateAudio
   }
 
   // 可选参数：seed
   const seed = params?.seed
   if (typeof seed === 'number' && Number.isInteger(seed)) {
-    body.seed = seed
+    metadata.seed = seed
   }
 
   // 可选参数：watermark
   const watermark = params?.watermark
   if (typeof watermark === 'boolean') {
-    body.watermark = watermark
+    metadata.watermark = watermark
   }
 
   // 可选参数：reference_video
   const referenceVideo = params?.reference_video
   if (typeof referenceVideo === 'string' && referenceVideo.trim()) {
-    body.reference_video = referenceVideo.trim() // Base64 编码的参考视频
+    metadata.reference_video = referenceVideo.trim() // Base64 编码的参考视频
   }
+
+  body.metadata = metadata
 
   // 提交任务
   const endpoint = `${service.baseUrl.replace(/\/+$/, '')}/v1/video/generations`
@@ -630,7 +660,12 @@ function listTools(serviceType: string): unknown[] {
               description: '模型 ID，缺省使用默认模型'
             },
             n: { type: 'integer', description: '生成数量，默认 1' },
-            size: { type: 'string', description: '图片尺寸，如 1024x1024' }
+            size: { type: 'string', description: '图片尺寸，如 1024x1024' },
+            quality: {
+              type: 'string',
+              enum: ['low', 'medium', 'high'],
+              description: '图片质量：low / medium / high，默认 medium'
+            }
           },
           required: ['prompt']
         }
@@ -642,8 +677,11 @@ function listTools(serviceType: string): unknown[] {
           type: 'object',
           properties: {
             image: {
-              type: 'string',
-              description: '输入图片（必填）：Base64 编码，可带 data:image/png;base64, 前缀，上限 50MB'
+              oneOf: [
+                { type: 'string' },
+                { type: 'array', items: { type: 'string' } }
+              ],
+              description: '输入图片（必填）：单张 Base64 字符串，或 Base64 字符串数组（多参考图），每项可带 data:image/png;base64, 前缀，每张上限 50MB'
             },
             prompt: { type: 'string', description: '编辑指令/重绘描述（必填）' },
             model: {
@@ -652,7 +690,12 @@ function listTools(serviceType: string): unknown[] {
               description: '模型 ID，缺省使用默认模型'
             },
             n: { type: 'integer', description: '生成数量，默认 1' },
-            size: { type: 'string', description: '图片尺寸，如 1024x1024' }
+            size: { type: 'string', description: '图片尺寸，如 1024x1024' },
+            quality: {
+              type: 'string',
+              enum: ['low', 'medium', 'high'],
+              description: '图片质量：low / medium / high，默认 medium'
+            }
           },
           required: ['image', 'prompt']
         }
@@ -677,9 +720,13 @@ function listTools(serviceType: string): unknown[] {
               enum: BUILTIN_MCP_VIDEO_DEFAULTS.resolutions,
               description: '视频分辨率：480p、720p、1080p、4K'
             },
-            duration: {
+            seconds: {
               type: 'integer',
               description: '视频时长（秒）：4-15 的整数，或 -1（模型自动选择）'
+            },
+            duration: {
+              type: 'integer',
+              description: '视频时长（秒）别名，与 seconds 等价：4-15 的整数，或 -1（模型自动选择）'
             },
             ratio: {
               type: 'string',
@@ -744,9 +791,13 @@ function listTools(serviceType: string): unknown[] {
               enum: BUILTIN_MCP_VIDEO_DEFAULTS.resolutions,
               description: '视频分辨率：480p、720p、1080p、4K'
             },
-            duration: {
+            seconds: {
               type: 'integer',
               description: '视频时长（秒）：4-15 的整数，或 -1（模型自动选择）'
+            },
+            duration: {
+              type: 'integer',
+              description: '视频时长（秒）别名，与 seconds 等价：4-15 的整数，或 -1（模型自动选择）'
             },
             ratio: {
               type: 'string',

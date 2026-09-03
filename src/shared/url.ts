@@ -9,6 +9,16 @@ export function toChatCompletionsUrl(endpoint: string): string {
   return `${trimmed}/v1/chat/completions`
 }
 
+/** Homepage / console URL for in-app split browser. */
+export function toHomepageUrl(endpoint: string): string {
+  const trimmed = endpoint.trim().replace(/\/+$/, '')
+  if (!trimmed) return 'http://ai.i-shadowclub.com'
+  return trimmed
+    .replace(/\/chat\/completions$/i, '')
+    .replace(/\/v1$/i, '')
+    .replace(/\/+$/, '')
+}
+
 /** Base URL for /v1/models speed test. */
 export function toOpenAiRoot(endpoint: string): string {
   const trimmed = endpoint.trim().replace(/\/+$/, '')

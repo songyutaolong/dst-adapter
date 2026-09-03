@@ -1,4 +1,4 @@
-name: Build macOS
+name: Build Windows
 
 on:
   workflow_dispatch:
@@ -10,8 +10,8 @@ permissions:
   contents: write
 
 jobs:
-  build-mac:
-    runs-on: macos-latest
+  build-win:
+    runs-on: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,21 +25,18 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build macOS DMG + ZIP
-        run: npm run dist:mac -- --publish never
+      - name: Build Windows NSIS + Portable
+        run: npm run dist:win -- --publish never
         env:
-          # 未配置签名时允许打未签名包，用户安装时需在「隐私与安全性」中允许
-          # 注意：未签名 mac 应用的自更新会被系统签名校验拦截，需配置签名后生效
           CSC_IDENTITY_AUTO_DISCOVERY: false
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dasuantou-adapter-mac
+          name: dasuantou-adapter-win
           path: |
-            release/*.dmg
-            release/*.zip
-            release/latest-mac.yml
+            release/*.exe
+            release/latest.yml
             release/*.blockmap
           if-no-files-found: error
 
@@ -48,8 +45,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
-          FILES="release/*.dmg release/*.zip release/latest-mac.yml release/*.blockmap"
+          FILES="release/*.exe release/latest.yml release/*.blockmap"
           gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 && \
             gh release upload --clobber "${GITHUB_REF_NAME}" $FILES || \
             gh release create "${GITHUB_REF_NAME}" \

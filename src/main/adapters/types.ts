@@ -2,7 +2,7 @@ import type {
   ApplyResult,
   DetectResult,
   Provider
-} from '../shared/types'
+} from '../../shared/types'
 
 export interface AppAdapter {
   id: string
@@ -11,6 +11,6 @@ export interface AppAdapter {
   detect(): Promise<DetectResult>
   readLive(): Promise<unknown>
   writeLive(provider: Provider): Promise<ApplyResult>
-  launch?(): Promise<void>
+  launch?(): Promise<void | { injected?: boolean; message?: string }>
   requiresQuitBeforeWrite?: boolean
 }

@@ -1,5 +1,6 @@
 import type { AppAdapter } from './types'
 import { workbuddyAdapter } from './workbuddy'
+import { codexAdapter } from './codex'
 import {
   cherryStudioAdapter,
   claudeCodeAdapter,
@@ -13,6 +14,7 @@ import type { AppId } from '../../shared/types'
 
 const adapters: AppAdapter[] = [
   workbuddyAdapter,
+  codexAdapter,
   cursorAdapter,
   continueAdapter,
   clineAdapter,
