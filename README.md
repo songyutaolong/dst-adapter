@@ -121,16 +121,18 @@ npm run dist:mac   # macOS（必须在 Mac 上执行）
 
 Endpoint 可填 Base URL 或完整 `.../v1/chat/completions`；保存时会规范化。
 
-## Codex 纯 API 与界面增强
+## Codex 纯 API
 
 - 下载页：<https://openai.com/zh-Hans-CN/codex/>
 - 配置：`~/.codex/config.toml`、`~/.codex/auth.json`
 - 纯 API 模式写入 `requires_openai_auth = false`，使用自定义 Endpoint + Key，不依赖 OpenAI / ChatGPT 账号。
 - Responses 上游可直连；Chat Completions 上游通过仅监听 `127.0.0.1` 的本机转换服务接入 Codex。
-- 「打开应用」会尝试带 CDP 调试参数启动 Codex，并注入本项目独立编写的插件入口解锁、基础中文与纯文本粘贴增强。
-- Microsoft Store 版若禁止直接启动包内程序，会回退到系统应用激活；纯 API 仍生效，但该次启动无法注入 UI 增强。
-
-> UI 增强依赖官方 Codex 页面结构，官方更新后可能暂时失效。此项目未复制或打包 Codex++ 源码；Codex++ 是独立的 AGPL-3.0 项目。
+- MCP 配置按服务 key 合并到 `~/.codex/config.toml`，例如：
+  ```toml
+  [mcp_servers."dst-image-mcp"]
+  url = "http://127.0.0.1:17888"
+  ```
+- Microsoft Store 版若禁止直接启动包内程序，会回退到系统应用激活；纯 API 配置仍生效。
 
 ## Deep Link（通用）
 

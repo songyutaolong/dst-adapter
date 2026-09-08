@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   AppId,
   AppInfo,
@@ -7,20 +7,41 @@ import type {
   Provider,
   SpeedTestResult,
   McpService,
-  McpServiceType,
-  McpProvider,
   Model,
   ModelConfig,
-  UpdateState
+  UpdateState,
+  GithubAccelerationResult
 } from '../../shared/types'
 import { BUILTIN_MCP_IMAGE_DEFAULTS, BUILTIN_MCP_VIDEO_DEFAULTS } from '../../shared/types'
 
 type TabId = 'provide' | 'mcp' | 'skill'
 
-const TABS: { id: TabId; label: string; icon: string }[] = [
-  { id: 'provide', label: 'Provider', icon: '⚡' },
-  { id: 'mcp', label: 'MCP', icon: '🔌' },
-  { id: 'skill', label: 'Skill', icon: '🧩' }
+function TabIcon({ id }: { id: TabId }) {
+  if (id === 'provide') {
+    return (
+      <svg className="tab-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <path d="M3 3h8v8H3V3zm10 0h8v8h-8V3zM3 13h8v8H3v-8zm10 0h8v8h-8v-8z" />
+      </svg>
+    )
+  }
+  if (id === 'mcp') {
+    return (
+      <svg className="tab-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <path d="M22.7 19.3 15.8 12.4c.6-1.5.3-3.3-.9-4.5-1.4-1.4-3.6-1.6-5.2-.6l2.8 2.8-2.8 2.8-2.8-2.8c-1 1.6-.8 3.8.6 5.2 1.2 1.2 3 1.5 4.5.9l6.9 6.9c.4.4 1 .4 1.4 0l2.4-2.4c.4-.4.4-1 0-1.4z" />
+      </svg>
+    )
+  }
+  return (
+    <svg className="tab-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M20.5 11H19V7c0-1.1-.9-2-2-2h-4V3.5C13 2.12 11.88 1 10.5 1S8 2.12 8 3.5V5H4c-1.1 0-2 .9-2 2v3.8h1.5c1.49 0 2.7 1.21 2.7 2.7s-1.21 2.7-2.7 2.7H2V20c0 1.1.9 2 2 2h3.8v-1.5c0-1.49 1.21-2.7 2.7-2.7s2.7 1.21 2.7 2.7V22H17c1.1 0 2-.9 2-2v-4h1.5c1.38 0 2.5-1.12 2.5-2.5S21.88 11 20.5 11z" />
+    </svg>
+  )
+}
+
+const TABS: { id: TabId; label: string }[] = [
+  { id: 'provide', label: '模型管理' },
+  { id: 'mcp', label: '工具管理' },
+  { id: 'skill', label: '技能管理' }
 ]
 
 type FormState = {
@@ -49,6 +70,10 @@ const emptyForm = (): FormState => ({
   vendor: 'dst'
 })
 
+function isMcpEnabledForApp(service: McpService, app: AppId): boolean {
+  return Boolean(service.enabledApps?.includes(app))
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>('provide')
   const [apps, setApps] = useState<AppInfo[]>([])
@@ -57,8 +82,8 @@ export default function App() {
   const [dataDir, setDataDir] = useState('')
   const [version, setVersion] = useState('')
   const [settings, setSettings] = useState<AppSettings | null>(null)
-  const [showForm, setShowForm] = useState(false)
-  const [editing, setEditing] = useState<Provider | null>(null)
+  const [showSettings, setShowSettings] = useState(false)
+  const [githubBusy, setGithubBusy] = useState(false)
   const [form, setForm] = useState<FormState>(emptyForm())
   const [busy, setBusy] = useState(false)
   const [syncing, setSyncing] = useState(false)
@@ -83,25 +108,16 @@ export default function App() {
 
   // MCP Services
   const [mcpServices, setMcpServices] = useState<McpService[]>([])
-  const [showMcpForm, setShowMcpForm] = useState(false)
-  const [editingMcp, setEditingMcp] = useState<McpService | null>(null)
-  const [mcpForm, setMcpForm] = useState({
-    name: '',
-    type: 'image-generation' as McpServiceType,
-    provider: 'gemini-3-pro-image' as McpProvider,
-    baseUrl: '',
-    modelId: '',
-    apiKey: ''
-  })
-
-  // 连接信息弹窗（MCP 连接信息复用 Provider 的配置）
-  const [showConnInfo, setShowConnInfo] = useState(false)
-  const [connInfo, setConnInfo] = useState<{ text: string; json: Record<string, unknown> } | null>(null)
-  const [copied, setCopied] = useState(false)
+  const didFullRefreshRef = useRef(false)
 
   const currentMeta = useMemo(
     () => apps.find((a) => a.id === currentApp),
     [apps, currentApp]
+  )
+
+  const appProviders = useMemo(
+    () => providers.filter((provider) => provider.app === currentApp),
+    [providers, currentApp]
   )
 
   const showToast = useCallback((text: string, error = false) => {
@@ -112,7 +128,7 @@ export default function App() {
   const refresh = useCallback(async () => {
     const [appList, providerList, dir, ver, appSettings, mcpList, modelList, syncTime] = await Promise.all([
       window.dst.listApps(),
-      window.dst.listProviders(currentApp),
+      window.dst.listProviders(),
       window.dst.getDataDir(),
       window.dst.getVersion(),
       window.dst.getSettings(),
@@ -131,16 +147,18 @@ export default function App() {
   }, [currentApp])
 
   useEffect(() => {
+    if (didFullRefreshRef.current) return
+    didFullRefreshRef.current = true
     refresh().catch((err) =>
       showToast(err instanceof Error ? err.message : String(err), true)
     )
   }, [refresh, showToast])
 
-  // 切换应用时刷新 providers 和 models
+  // 切换应用只刷新轻量数据，避免重新探测所有应用。
   useEffect(() => {
     if (apps.length === 0) return
     Promise.all([
-      window.dst.listProviders(currentApp),
+      window.dst.listProviders(),
       window.dst.listModels(currentApp),
       window.dst.getLastSyncAt()
     ])
@@ -173,14 +191,21 @@ export default function App() {
   const onCheckUpdate = async () => {
     setUpdateBusy(true)
     try {
-      const s = await window.dst.checkForUpdate(true)
+      let s = await window.dst.checkForUpdate(true)
       setUpdate(s)
       if (s.status === 'available') {
-        showToast(`发现新版本 v${s.version}，点击「下载更新」`)
+        showToast(`发现新版本 v${s.version}，开始下载`)
+        s = await window.dst.downloadUpdate()
+        setUpdate(s)
+        if (s.status === 'downloaded') {
+          showToast('下载完成，可点击「重启安装」')
+        }
       } else if (s.status === 'up-to-date') {
         showToast('已是最新版本')
       } else if (s.status === 'error' || s.status === 'unsupported') {
         showToast(s.error || '检查更新失败', true)
+      } else if (s.status === 'downloaded') {
+        showToast('更新已就绪，请重启安装')
       }
     } catch (err) {
       showToast(err instanceof Error ? err.message : String(err), true)
@@ -205,36 +230,26 @@ export default function App() {
     void window.dst.installUpdate()
   }
 
-  const openCreate = () => {
-    // 已配置过则反写连接信息；API Key 脱敏显示
-    const existing = providers.find((p) => p.app === currentApp)
-    setEditing(null)
+  const loadSettingsForm = useCallback((appSettings: AppSettings | null, providerList: Provider[]) => {
+    const existing = providerList[0]
+    const apiKey = appSettings?.providerApiKey || existing?.apiKey || ''
     setForm({
-      name: existing?.name || 'dst',
-      endpoint: existing?.endpoint || 'https://dst-ai.com',
-      apiKey: existing?.apiKey ? maskApiKey(existing.apiKey) : '',
-      rawApiKey: existing?.apiKey || undefined,
-      wireApi: existing?.wireApi || 'chat_completions',
-      vendor: existing?.vendor || 'dst'
+      name: appSettings?.providerName || existing?.name || 'dst',
+      endpoint: appSettings?.providerEndpoint || existing?.endpoint || 'https://dst-ai.com',
+      apiKey: apiKey ? maskApiKey(apiKey) : '',
+      rawApiKey: apiKey || undefined,
+      wireApi: appSettings?.providerWireApi || existing?.wireApi || 'chat_completions',
+      vendor: appSettings?.providerVendor || existing?.vendor || 'dst'
     })
-    setShowForm(true)
-  }
+  }, [])
 
-  const openEdit = (p: Provider) => {
-    setEditing(p)
-    setForm({
-      name: p.name,
-      endpoint: p.endpoint,
-      apiKey: p.apiKey ? maskApiKey(p.apiKey) : '',
-      rawApiKey: p.apiKey || undefined,
-      wireApi: p.wireApi || 'chat_completions',
-      vendor: p.vendor || 'dst'
-    })
-    setShowForm(true)
-  }
+  useEffect(() => {
+    if (showSettings) {
+      loadSettingsForm(settings, providers)
+    }
+  }, [showSettings, settings, providers, loadSettingsForm])
 
-  const saveForm = async () => {
-    // 若输入框仍是脱敏态（含掩码），说明未修改，使用原始 Key
+  const saveSettingsProvider = async () => {
     const finalApiKey = form.apiKey.includes('****')
       ? form.rawApiKey || ''
       : form.apiKey.trim()
@@ -244,86 +259,84 @@ export default function App() {
     }
     setBusy(true)
     try {
-      let providerId: string
-      
-      if (editing) {
-        await window.dst.updateProvider(editing.id, {
-          name: form.name.trim(),
-          endpoint: form.endpoint.trim(),
-          apiKey: finalApiKey,
-          wireApi: form.wireApi,
-          vendor: form.vendor.trim() || 'dst'
-        })
-        providerId = editing.id
-        showToast('配置已更新，正在同步模型...')
-      } else {
-        // 检查是否已存在 provider，如果存在则更新，否则创建
-        const existing = providers.find(p => p.app === currentApp)
-        if (existing) {
-          await window.dst.updateProvider(existing.id, {
-            name: form.name.trim(),
-            endpoint: form.endpoint.trim(),
-            apiKey: finalApiKey,
-            wireApi: form.wireApi,
-            vendor: form.vendor.trim() || 'dst'
-          })
-          providerId = existing.id
-        } else {
-          const newProvider = await window.dst.createProvider({
-            name: form.name.trim(),
-            app: currentApp,
-            endpoint: form.endpoint.trim(),
-            apiKey: finalApiKey,
-            wireApi: form.wireApi,
-            vendor: form.vendor.trim() || 'dst'
-          })
-          providerId = newProvider.id
+      const next = await window.dst.updateSettings({
+        providerName: form.name.trim() || 'dst',
+        providerEndpoint: form.endpoint.trim() || 'https://dst-ai.com',
+        providerApiKey: finalApiKey,
+        providerWireApi: form.wireApi,
+        providerVendor: form.vendor.trim() || 'dst'
+      })
+      setSettings(next)
+      showToast('Provider 配置已保存')
+      await refresh()
+      const list = await window.dst.listMcpServices()
+      for (const s of list.filter((item) => item.builtin && !item.running)) {
+        try {
+          await window.dst.startMcpService(s.id, currentApp)
+        } catch {
+          /* 无 Key 或已占用时忽略 */
         }
-        showToast('配置成功，正在同步模型...')
       }
-      
-      // 同步模型
-      setSyncing(true)
-      const syncResult = await window.dst.syncModels(
-        providerId,
-        currentApp,
-        form.endpoint.trim(),
-        finalApiKey
-      )
-      
-      if (syncResult.ok) {
-        showToast(`已同步 ${syncResult.count} 个模型`)
-      } else {
-        showToast(syncResult.message, true)
-      }
-      
-      setShowForm(false)
       await refresh()
     } catch (err) {
       showToast(err instanceof Error ? err.message : String(err), true)
     } finally {
       setBusy(false)
-      setSyncing(false)
+    }
+  }
+
+  const toggleLaunchAtLogin = async () => {
+    if (!settings) return
+    try {
+      const next = await window.dst.updateSettings({
+        launchAtLogin: !settings.launchAtLogin
+      })
+      setSettings(next)
+      showToast(next.launchAtLogin ? '已开启开机启动' : '已关闭开机启动')
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), true)
     }
   }
 
   // 刷新模型列表
   const onSyncModels = async () => {
-    const provider = providers.find(p => p.app === currentApp)
-    if (!provider) {
-      showToast('请先配置 Provider', true)
+    const endpoint = settings?.providerEndpoint || appProviders[0]?.endpoint || providers[0]?.endpoint
+    const apiKey = settings?.providerApiKey || appProviders[0]?.apiKey || providers[0]?.apiKey
+    if (!endpoint || !apiKey?.trim()) {
+      showToast('请先在设置中配置 Provider', true)
+      setShowSettings(true)
       return
     }
-    
+
     setSyncing(true)
     try {
+      let providerId: string
+      const existing = appProviders[0]
+      const patch = {
+        name: settings?.providerName || 'dst',
+        endpoint,
+        apiKey,
+        wireApi: settings?.providerWireApi || 'chat_completions',
+        vendor: settings?.providerVendor || 'dst'
+      }
+      if (existing) {
+        await window.dst.updateProvider(existing.id, patch)
+        providerId = existing.id
+      } else {
+        const created = await window.dst.createProvider({
+          ...patch,
+          app: currentApp
+        })
+        providerId = created.id
+      }
+
       const result = await window.dst.syncModels(
-        provider.id,
+        providerId,
         currentApp,
-        provider.endpoint,
-        provider.apiKey
+        endpoint,
+        apiKey
       )
-      
+
       if (result.ok) {
         showToast(`已同步 ${result.count} 个模型`)
       } else {
@@ -334,6 +347,22 @@ export default function App() {
       showToast(err instanceof Error ? err.message : String(err), true)
     } finally {
       setSyncing(false)
+    }
+  }
+
+  const toggleGithubAcceleration = async () => {
+    if (!settings) return
+    setGithubBusy(true)
+    try {
+      const result: GithubAccelerationResult = await window.dst.toggleGithubAcceleration(
+        !settings.githubAccelerationEnabled
+      )
+      setSettings(await window.dst.getSettings())
+      showToast(result.message, !result.ok)
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), true)
+    } finally {
+      setGithubBusy(false)
     }
   }
 
@@ -412,13 +441,7 @@ export default function App() {
     try {
       const result = await window.dst.launchApp(currentApp)
       const message = result?.message || '已尝试启动应用'
-      const warn =
-        currentApp === 'codex' &&
-        result &&
-        'injected' in result &&
-        result.injected === false &&
-        Boolean(settings?.codexEnhancements)
-      showToast(message, warn)
+      showToast(message)
     } catch (err) {
       showToast(err instanceof Error ? err.message : String(err), true)
     } finally {
@@ -437,72 +460,6 @@ export default function App() {
 
   // ── MCP Service Operations ──
 
-  const openMcpCreate = () => {
-    setEditingMcp(null)
-    setMcpForm({
-      name: '',
-      type: 'image-generation',
-      provider: 'gemini-3-pro-image',
-      baseUrl: '',
-      modelId: '',
-      apiKey: ''
-    })
-    setShowMcpForm(true)
-  }
-
-  const openMcpEdit = (s: McpService) => {
-    setEditingMcp(s)
-    setMcpForm({
-      name: s.name,
-      type: s.type,
-      provider: s.provider,
-      baseUrl: s.baseUrl,
-      modelId: s.modelId,
-      apiKey: s.apiKey
-    })
-    setShowMcpForm(true)
-  }
-
-  const saveMcpForm = async () => {
-    if (!mcpForm.name.trim() || !mcpForm.baseUrl.trim() || !mcpForm.apiKey.trim()) {
-      showToast('请填写名称、Base URL 和 API Key', true)
-      return
-    }
-    if (!mcpForm.modelId.trim()) {
-      showToast('请填写模型 ID', true)
-      return
-    }
-    setBusy(true)
-    try {
-      if (editingMcp) {
-        await window.dst.updateMcpService(editingMcp.id, mcpForm)
-        showToast('已更新 MCP 服务')
-      } else {
-        await window.dst.createMcpService(mcpForm)
-        showToast('已添加 MCP 服务')
-      }
-      setShowMcpForm(false)
-      await refresh()
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : String(err), true)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const onMcpDelete = async (id: string) => {
-    setBusy(true)
-    try {
-      await window.dst.deleteMcpService(id)
-      showToast('已删除 MCP 服务')
-      await refresh()
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : String(err), true)
-    } finally {
-      setBusy(false)
-    }
-  }
-
   // 每次操作前重新拉取最新状态，避免陈旧 UI 状态导致误操作
   const getFreshMcpService = async (id: string): Promise<McpService | undefined> => {
     const list = await window.dst.listMcpServices()
@@ -518,18 +475,14 @@ export default function App() {
         showToast(`${fresh.name} 已在运行中（端口 :${fresh.port}）`, true)
         return
       }
-      // 连接信息来自当前应用的 Provider 配置
-      const provider = providers.find((p) => p.app === currentApp)
-      if (!provider) {
-        showToast('请先在「配置 Provider」中配置连接信息', true)
-        return
-      }
-      if (!provider.apiKey.trim()) {
-        showToast('请在「配置 Provider」中填写 API Key', true)
+      const apiKey = settings?.providerApiKey || appProviders[0]?.apiKey || providers[0]?.apiKey
+      if (!apiKey?.trim()) {
+        showToast('请先在设置中配置 Provider 并填写 API Key', true)
+        setShowSettings(true)
         return
       }
       await window.dst.startMcpService(s.id, currentApp)
-      showToast(`已启动 ${s.name}（使用 ${provider.name} 连接）`)
+      showToast(`已启动 ${s.name}`)
       await refresh()
     } catch (err) {
       showToast(err instanceof Error ? err.message : String(err), true)
@@ -537,6 +490,33 @@ export default function App() {
       setBusy(false)
     }
   }
+
+  const onMcpEnable = async (s: McpService, enabled: boolean) => {
+    setBusy(true)
+    try {
+      const result = await window.dst.enableMcpService(s.id, enabled, currentApp)
+      showToast(result.message, !result.ok)
+      await refresh()
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const builtinMcpServices = useMemo(
+    () => mcpServices.filter((s) => s.builtin),
+    [mcpServices]
+  )
+
+  const currentAppMcpServices = useMemo(
+    () =>
+      builtinMcpServices.map((service) => ({
+        ...service,
+        enabledForCurrentApp: isMcpEnabledForApp(service, currentApp)
+      })),
+    [builtinMcpServices, currentApp]
+  )
 
   const onMcpStop = async (s: McpService) => {
     setBusy(true)
@@ -557,97 +537,305 @@ export default function App() {
     }
   }
 
-  const openConnInfo = async (id: string) => {
-    try {
-      const info = await window.dst.getMcpConnectionInfo(id)
-      setConnInfo(info)
-      setCopied(false)
-      setShowConnInfo(true)
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : String(err), true)
-    }
-  }
-
-  const copyConnInfo = async () => {
-    if (!connInfo) return
-    try {
-      await window.dst.writeClipboard(connInfo.text)
-      setCopied(true)
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : String(err), true)
-    }
-  }
-
-  const toggleCodexEnhancements = async () => {
-    if (!settings) return
-    try {
-      const next = await window.dst.updateSettings({
-        codexEnhancements: !settings.codexEnhancements
-      })
-      setSettings(next)
-      showToast(`Codex 界面增强已${next.codexEnhancements ? '开启' : '关闭'}`)
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : String(err), true)
-    }
-  }
-
   return (
     <div className="app">
-      <div className="layout">
+      <div className={`layout ${showSettings ? 'settings-layout' : ''}`}>
         {/* ── Left Sidebar: App List ── */}
-        <aside className="sidebar">
-          <h3>应用</h3>
-          <div className="sidebar-apps">
-            {apps.map((app) => (
-              <div
-                key={app.id}
-                className={`app-item-row ${currentApp === app.id ? 'active' : ''} ${!app.implemented ? 'disabled' : ''}`}
-              >
-                <button
-                  className="app-item"
-                  onClick={() => setCurrentApp(app.id)}
-                  disabled={!app.implemented}
+        {!showSettings && (
+          <aside className="sidebar">
+            <h3>应用</h3>
+            <div className="sidebar-apps">
+              {apps.map((app) => (
+                <div
+                  key={app.id}
+                  className={`app-item-row ${currentApp === app.id ? 'active' : ''} ${!app.implemented ? 'disabled' : ''}`}
                 >
-                  <div>{app.name}</div>
-                  <div className="meta">
-                    {app.implemented ? (
-                      <span className={`badge ${app.installed ? 'ok' : 'warn'}`}>
-                        {app.installed ? '已安装' : '未检测到'}
-                      </span>
-                    ) : (
-                      <span className="badge">集成中</span>
-                    )}
-                  </div>
-                </button>
-                {app.downloadUrl && (
                   <button
-                    className="app-download"
-                    title={`下载 ${app.name}`}
-                    aria-label={`下载 ${app.name}`}
-                    onClick={() => onDownload(app)}
+                    className="app-item"
+                    onClick={() => setCurrentApp(app.id)}
+                    disabled={!app.implemented}
                   >
-                    ↓
+                    <div>{app.name}</div>
+                    <div className="meta">
+                      {app.implemented ? (
+                        <span className={`badge ${app.installed ? 'ok' : 'warn'}`}>
+                          {app.installed ? '已安装' : '未检测到'}
+                        </span>
+                      ) : (
+                        <span className="badge">集成中</span>
+                      )}
+                    </div>
                   </button>
-                )}
-              </div>
-            ))}
-          </div>
-          <div className="sidebar-footer">
-            <span>v{version || '…'}</span>
-            <button
-              className="update-link"
-              onClick={onCheckUpdate}
-              disabled={updateBusy}
-              title="检查更新"
-              aria-label="检查更新"
-            >
-              {updateBusy ? '⟳' : '↻'}
-            </button>
-          </div>
-        </aside>
+                  {app.downloadUrl && (
+                    <button
+                      className="app-download"
+                      title={`下载 ${app.name}`}
+                      aria-label={`下载 ${app.name}`}
+                      onClick={() => onDownload(app)}
+                    >
+                      ↓
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+            <div className="sidebar-footer">
+              <span>v{version || '…'}</span>
+              <button
+                className={`settings-entry ${showSettings ? 'active' : ''}`}
+                onClick={() => setShowSettings(true)}
+                title="设置"
+                aria-label="设置"
+              >
+                设置
+              </button>
+            </div>
+          </aside>
+        )}
 
         {/* ─ Right Panel: Tab Content ── */}
-        <main className="panel">
+        <main className={`panel ${showSettings ? 'settings-panel' : ''}`}>
+          {showSettings ? (
+            <>
+              <div className="panel-head">
+                <div>
+                  <h2>设置</h2>
+                  <div className="sub" style={{ color: 'var(--muted)', fontSize: 13 }}>
+                    Provider、MCP 服务、版本更新与窗口行为
+                  </div>
+                </div>
+                <div className="actions">
+                  <button className="btn primary settings-btn" onClick={() => setShowSettings(false)}>
+                    ← 返回主页
+                  </button>
+                </div>
+              </div>
+              <div className="panel-body settings-page">
+                <section className="settings-section">
+                  <h3>版本更新</h3>
+                  <p className="settings-desc">当前版本：v{version || '…'} · 检查并安装最新版本。</p>
+                  <div className="actions settings-actions">
+                    <button
+                      className="btn primary settings-btn"
+                      onClick={onCheckUpdate}
+                      disabled={updateBusy}
+                    >
+                      {updateBusy && update?.status === 'checking' ? '检查中…' : '获取最新版本并更新'}
+                    </button>
+                    {update?.status === 'available' && (
+                      <button
+                        className="btn primary settings-btn"
+                        onClick={onDownloadUpdate}
+                        disabled={updateBusy}
+                      >
+                        下载 v{update.version}
+                      </button>
+                    )}
+                    {update?.status === 'downloaded' && (
+                      <button className="btn primary settings-btn" onClick={onInstallUpdate}>
+                        重启安装
+                      </button>
+                    )}
+                  </div>
+                  {update && update.status !== 'idle' && (
+                    <div
+                      className={`update-banner ${
+                        update.status === 'error' || update.status === 'unsupported'
+                          ? 'error'
+                          : ''
+                      }`}
+                      style={{ marginTop: 12 }}
+                    >
+                      <div className="update-info">
+                        {update.status === 'checking' && <span>正在检查更新…</span>}
+                        {update.status === 'available' && (
+                          <span>
+                            发现新版本 <b>v{update.version}</b>（当前 v{version}）
+                          </span>
+                        )}
+                        {update.status === 'downloading' && (
+                          <span>正在下载 v{update.version}… {update.percent ?? 0}%</span>
+                        )}
+                        {update.status === 'downloaded' && (
+                          <span>v{update.version} 已下载完成，点击「重启安装」</span>
+                        )}
+                        {update.status === 'up-to-date' && (
+                          <span>已是最新版本 v{version}</span>
+                        )}
+                        {update.status === 'error' && (
+                          <span>检查更新失败：{update.error}</span>
+                        )}
+                        {update.status === 'unsupported' && (
+                          <span>{update.error}</span>
+                        )}
+                      </div>
+                      {update.status === 'downloading' && (
+                        <div className="update-progress">
+                          <div
+                            className="update-progress-bar"
+                            style={{ width: `${update.percent ?? 0}%` }}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </section>
+
+                <section className="settings-section">
+                  <h3>Provider 配置</h3>
+                  <p className="settings-desc">所有应用共用这份大算头连接信息；保存后自动同步，无需按应用单独配置。</p>
+                  <div className="form">
+                    <div className="field">
+                      <label>名称</label>
+                      <input value={form.name} readOnly disabled />
+                    </div>
+                    <div className="field">
+                      <label>Base URL</label>
+                      <input value={form.endpoint} readOnly disabled />
+                    </div>
+                    <div className="field">
+                      <label>API Key</label>
+                      <input
+                        type="password"
+                        value={form.apiKey}
+                        onChange={(e) =>
+                          setForm((s) => ({
+                            ...s,
+                            apiKey: e.target.value,
+                            rawApiKey: e.target.value === s.apiKey ? s.rawApiKey : undefined
+                          }))
+                        }
+                        placeholder="sk-..."
+                      />
+                    </div>
+                    <div className="actions settings-actions">
+                      <button
+                        className="btn settings-btn"
+                        disabled={busy || !form.apiKey.trim()}
+                        onClick={async () => {
+                          setBusy(true)
+                          try {
+                            const testKey = form.apiKey.includes('****')
+                              ? form.rawApiKey || ''
+                              : form.apiKey.trim()
+                            if (!testKey) {
+                              showToast('请填写 API Key', true)
+                              return
+                            }
+                            const result: SpeedTestResult = await window.dst.speedTest(
+                              form.endpoint,
+                              testKey
+                            )
+                            if (result.ok) {
+                              showToast(`连接成功 ${result.latencyMs}ms`)
+                            } else {
+                              showToast(`连接失败：${result.error || result.status}`, true)
+                            }
+                          } catch (err) {
+                            showToast(err instanceof Error ? err.message : String(err), true)
+                          } finally {
+                            setBusy(false)
+                          }
+                        }}
+                      >
+                        测试连接
+                      </button>
+                      <button
+                        className="btn primary settings-btn"
+                        disabled={busy}
+                        onClick={saveSettingsProvider}
+                      >
+                        保存配置
+                      </button>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="settings-section">
+                  <h3>GitHub 加速</h3>
+                  <p className="settings-desc">解析 GitHub 相关 IP，并写入本机 hosts 托管配置块。</p>
+                  <div className="settings-switch-row">
+                    <span>GitHub 加速</span>
+                    <button
+                      type="button"
+                      className={`switch ${settings?.githubAccelerationEnabled ? 'on' : ''}`}
+                      role="switch"
+                      aria-checked={Boolean(settings?.githubAccelerationEnabled)}
+                      aria-label="GitHub 加速"
+                      onClick={toggleGithubAcceleration}
+                      disabled={githubBusy}
+                    >
+                      <span className="switch-knob" />
+                    </button>
+                  </div>
+                </section>
+
+                <section className="settings-section">
+                  <h3>MCP 设置</h3>
+                  <p className="settings-desc">启动或停止本机 MCP HTTP 服务。打开软件后会自动启动，无需手动点击。</p>
+                  {builtinMcpServices.length === 0 ? (
+                    <div className="empty">暂无内置 MCP 服务</div>
+                  ) : (
+                    <div className="list">
+                      {builtinMcpServices.map((s) => (
+                        <div
+                          key={s.id}
+                          className={`card builtin-card ${s.running ? 'enabled' : ''}`}
+                        >
+                          <div>
+                            <h4>
+                              {s.name}
+                              <span className="badge builtin">内置</span>
+                              {s.running ? (
+                                <span className="badge ok">运行中 :{s.port}</span>
+                              ) : (
+                                <span className="badge">未运行</span>
+                              )}
+                            </h4>
+                            <div className="row settings-actions">
+                              <button
+                                className="btn primary settings-btn"
+                                disabled={busy}
+                                onClick={() => onMcpStart(s)}
+                              >
+                                启动服务
+                              </button>
+                              <button
+                                className="btn danger settings-btn"
+                                disabled={busy}
+                                onClick={() => onMcpStop(s)}
+                              >
+                                停止服务
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+
+                <section className="settings-section">
+                  <h3>窗口行为</h3>
+                  <p className="settings-desc">设置是否在系统登录后自动启动本应用。</p>
+                  <div className="settings-switch-row">
+                    <span>开机启动</span>
+                    <button
+                      type="button"
+                      className={`switch ${settings?.launchAtLogin ? 'on' : ''}`}
+                      role="switch"
+                      aria-checked={Boolean(settings?.launchAtLogin)}
+                      aria-label="开机启动"
+                      onClick={toggleLaunchAtLogin}
+                    >
+                      <span className="switch-knob" />
+                    </button>
+                  </div>
+                </section>
+              </div>
+            </>
+          ) : (
+            <>
           {/* ── Tab Bar ── */}
           <div className="tab-bar">
             {TABS.map((tab) => (
@@ -656,7 +844,9 @@ export default function App() {
                 className={`tab-item ${activeTab === tab.id ? 'active' : ''}`}
                 onClick={() => setActiveTab(tab.id)}
               >
-                <span className="tab-icon">{tab.icon}</span>
+                <span className="tab-icon-wrap">
+                  <TabIcon id={tab.id} />
+                </span>
                 {tab.label}
               </button>
             ))}
@@ -688,8 +878,8 @@ export default function App() {
                     <>
                     <button
                       className="btn primary"
-                      onClick={openCreate}
-                      disabled={busy}
+                      onClick={onSyncModels}
+                      disabled={busy || syncing}
                     >
                       <svg
                         className="btn-icon"
@@ -702,7 +892,7 @@ export default function App() {
                       >
                         <path d="M12 5v14M5 12h14" />
                       </svg>
-                      配置 Provider
+                      {syncing ? '同步中...' : '获取模型列表'}
                     </button>
                     <button className="btn" onClick={onLaunch} disabled={busy}>
                       <svg
@@ -726,20 +916,12 @@ export default function App() {
                 </div>
               </div>
 
-              {currentApp === 'codex' && settings && (
+              {currentApp === 'codex' && (
                 <div className="feature-banner">
                   <div>
                     <strong>纯 API 模式</strong>
                     <span>无需 OpenAI 账号；启用后由大算头 Provider 提供模型。</span>
                   </div>
-                  <label>
-                    <input
-                      type="checkbox"
-                      checked={settings.codexEnhancements}
-                      onChange={toggleCodexEnhancements}
-                    />
-                    插件解锁与基础 UI 增强
-                  </label>
                 </div>
               )}
 
@@ -748,15 +930,14 @@ export default function App() {
                   <div className="empty">
                     {currentMeta?.name} 仅搭建框架，启用写入将在后续版本实现。
                   </div>
-                ) : providers.length === 0 ? (
-                  <div className="empty">
-                    <div className="empty-icon">⚡</div>
-                    <div>还没有配置 Provider。点击「配置 Provider」开始使用。</div>
-                  </div>
                 ) : models.length === 0 ? (
                   <div className="empty">
                     <div className="empty-icon">📦</div>
-                    <div>暂无模型。点击「刷新模型清单」同步可用模型。</div>
+                    <div>
+                      {settings?.providerApiKey || appProviders.length > 0
+                        ? '暂无模型。点击「获取模型列表」同步可用模型。'
+                        : '还没有配置 Provider。请先到设置中配置，再点击「获取模型列表」。'}
+                    </div>
                   </div>
                 ) : (
                   <>
@@ -877,118 +1058,73 @@ export default function App() {
             <>
               <div className="panel-head">
                 <div>
-                  <h2>MCP 服务</h2>
+                  <h2>工具管理</h2>
                   <div className="sub" style={{ color: 'var(--muted)', fontSize: 12 }}>
-                    管理 {currentMeta?.name || currentApp} 的 Model Context Protocol 服务
+                    按应用独立启用；当前写入 {currentMeta?.name || currentApp}
                   </div>
                 </div>
               </div>
               <div className="panel-body">
-                {mcpServices.length === 0 ? (
+                {builtinMcpServices.length === 0 ? (
                   <div className="empty">
                     <div className="empty-icon">🔌</div>
-                    <div>还没有 MCP 服务。添加图片生成等服务，然后启动。</div>
-                    <div className="sub" style={{ marginTop: 8 }}>
-                      支持 Gemini 3 Pro Image / GPT Image 2 等图片生成服务。
-                    </div>
+                    <div>暂无内置 MCP 服务。</div>
                   </div>
                 ) : (
                   <div className="list">
-                    {mcpServices.map((s) =>
-                      s.builtin ? (
-                        <div
-                          key={s.id}
-                          className={`card builtin-card ${s.running ? 'enabled' : ''}`}
-                        >
-                          <div>
-                            <h4>
-                              {s.name}
-                              <span className="badge builtin">内置</span>
-                              {s.running ? (
-                                <span className="badge ok">运行中 :{s.port}</span>
-                              ) : (
-                                <span className="badge">未运行</span>
-                              )}
-                            </h4>
-                            <div className="sub">服务商：{s.provider === 'dst' ? '大算头' : s.provider === 'gemini-3-pro-image' ? 'Gemini 3 Pro Image' : s.provider === 'gpt-image-2' ? 'GPT Image 2' : s.provider === 'doubao-seedance-2.0' ? '豆包 Seedance 2.0' : '自定义'}</div>
-                            <div className="sub">支持模型：{s.type === 'video-generation' ? BUILTIN_MCP_VIDEO_DEFAULTS.models.join(' / ') : BUILTIN_MCP_IMAGE_DEFAULTS.models.join(' / ')}（请求时按参数选择）</div>
-                            <div className="row">
-                              <button
-                                className="btn primary"
-                                disabled={busy}
-                                onClick={() => onMcpStart(s)}
-                              >
-                                启动
-                              </button>
-                              <button
-                                className="btn danger"
-                                disabled={busy}
-                                onClick={() => onMcpStop(s)}
-                              >
-                                停止
-                              </button>
-                              <button
-                                className="btn"
-                                disabled={busy}
-                                onClick={() => openConnInfo(s.id)}
-                              >
-                                复制配置信息
-                              </button>
-                            </div>
+                    {currentAppMcpServices.map((s) => (
+                      <div
+                        key={s.id}
+                        className={`card builtin-card ${s.enabledForCurrentApp ? 'enabled' : ''}`}
+                      >
+                        <div>
+                          <h4>
+                            {s.name}
+                            <span className="badge builtin">内置</span>
+                            {s.enabledForCurrentApp ? (
+                              <span className="badge ok">当前应用已启用</span>
+                            ) : (
+                              <span className="badge">当前应用未启用</span>
+                            )}
+                          </h4>
+                          <div className="sub">
+                            服务商：
+                            {s.provider === 'dst'
+                              ? '大算头'
+                              : s.provider === 'gemini-3-pro-image'
+                                ? 'Gemini 3 Pro Image'
+                                : s.provider === 'gpt-image-2'
+                                  ? 'GPT Image 2'
+                                  : s.provider === 'doubao-seedance-2.0'
+                                    ? '豆包 Seedance 2.0'
+                                    : '自定义'}
+                          </div>
+                          <div className="sub">
+                            支持模型：
+                            {s.type === 'video-generation'
+                              ? BUILTIN_MCP_VIDEO_DEFAULTS.models.join(' / ')
+                              : BUILTIN_MCP_IMAGE_DEFAULTS.models.join(' / ')}
+                            （请求时按参数选择）
+                          </div>
+                          <div className="row mcp-actions">
+                            <button
+                              className="btn primary"
+                              disabled={busy}
+                              onClick={() => onMcpEnable(s, true)}
+                            >
+                              启用
+                            </button>
+                            <button
+                              className="btn danger"
+                              disabled={busy}
+                              onClick={() => onMcpEnable(s, false)}
+                            >
+                              停用
+                            </button>
                           </div>
                         </div>
-                      ) : (
-                        <div
-                          key={s.id}
-                          className={`card ${s.running ? 'enabled' : ''}`}
-                        >
-                          <div>
-                            <h4>
-                              {s.name}
-                              {s.running ? (
-                                <span className="badge ok">运行中 :{s.port}</span>
-                              ) : (
-                                <span className="badge">未运行</span>
-                              )}
-                            </h4>
-                            <div className="sub">类型：{s.type === 'image-generation' ? '图片生成' : s.type === 'video-generation' ? '视频生成' : s.type}</div>
-                            <div className="sub">服务商：{s.provider === 'gemini-3-pro-image' ? 'Gemini 3 Pro Image' : s.provider === 'gpt-image-2' ? 'GPT Image 2' : s.provider === 'doubao-seedance-2.0' ? '豆包 Seedance 2.0' : s.provider === 'dst' ? '大算头' : '自定义'}</div>
-                            <div className="sub">模型：{s.modelId}</div>
-                            <div className="sub">Endpoint：{s.baseUrl}</div>
-                            <div className="row">
-                              <button
-                                className="btn primary"
-                                disabled={busy}
-                                onClick={() => onMcpStart(s)}
-                              >
-                                启动
-                              </button>
-                              <button
-                                className="btn danger"
-                                disabled={busy}
-                                onClick={() => onMcpStop(s)}
-                              >
-                                停止
-                              </button>
-                              <button
-                                className="btn"
-                                disabled={busy}
-                                onClick={() => openMcpEdit(s)}
-                              >
-                                编辑
-                              </button>
-                              <button
-                                className="btn danger"
-                                disabled={busy || s.running}
-                                onClick={() => onMcpDelete(s.id)}
-                              >
-                                删除
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-                      )
-                    )}
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>
@@ -1000,7 +1136,7 @@ export default function App() {
             <>
               <div className="panel-head">
                 <div>
-                  <h2>Skill 技能</h2>
+                  <h2>技能管理</h2>
                   <div className="sub" style={{ color: 'var(--muted)', fontSize: 12 }}>
                     管理 {currentMeta?.name || currentApp} 的可复用 AI 技能模板
                   </div>
@@ -1017,95 +1153,7 @@ export default function App() {
               </div>
             </>
           )}
-
-          {/* ── Auto Update Banner ── */}
-          {update && update.status !== 'idle' && (
-            <div
-              className={`update-banner ${
-                update.status === 'error' || update.status === 'unsupported'
-                  ? 'error'
-                  : ''
-              }`}
-            >
-              <div className="update-info">
-                {update.status === 'checking' && <span>正在检查更新…</span>}
-                {update.status === 'available' && (
-                  <span>
-                    发现新版本 <b>v{update.version}</b>（当前 v{version}）
-                  </span>
-                )}
-                {update.status === 'downloading' && (
-                  <span>正在下载 v{update.version}…</span>
-                )}
-                {update.status === 'downloaded' && (
-                  <span>
-                    v{update.version} 已下载完成
-                  </span>
-                )}
-                {update.status === 'up-to-date' && (
-                  <span>已是最新版本 v{version}</span>
-                )}
-                {update.status === 'error' && (
-                  <span>检查更新失败：{update.error}</span>
-                )}
-                {update.status === 'unsupported' && (
-                  <span>{update.error}</span>
-                )}
-              </div>
-              <div className="update-actions">
-                {update.status === 'available' && (
-                  <button
-                    className="btn primary small"
-                    onClick={onDownloadUpdate}
-                    disabled={updateBusy}
-                  >
-                    下载更新
-                  </button>
-                )}
-                {update.status === 'downloading' && (
-                  <span className="update-percent">
-                    {update.percent ?? 0}%
-                  </span>
-                )}
-                {update.status === 'downloaded' && (
-                  <>
-                    <span className="update-percent">100%</span>
-                    <button
-                      className="btn primary small"
-                      onClick={onInstallUpdate}
-                    >
-                      重启安装
-                    </button>
-                  </>
-                )}
-                {update.status === 'error' && (
-                  <button
-                    className="btn small"
-                    onClick={onCheckUpdate}
-                    disabled={updateBusy}
-                  >
-                    重试
-                  </button>
-                )}
-                {(update.status === 'up-to-date' ||
-                  update.status === 'unsupported') && (
-                  <button
-                    className="btn small"
-                    onClick={() => setUpdate((u) => (u ? { ...u, status: 'idle' } : u))}
-                  >
-                    知道了
-                  </button>
-                )}
-              </div>
-              {update.status === 'downloading' && (
-                <div className="update-progress">
-                  <div
-                    className="update-progress-bar"
-                    style={{ width: `${update.percent ?? 0}%` }}
-                  />
-                </div>
-              )}
-            </div>
+            </>
           )}
 
           <p className="footer-note">
@@ -1115,115 +1163,6 @@ export default function App() {
         </main>
       </div>
 
-      {showForm && (
-        <div className="modal-backdrop" onClick={() => setShowForm(false)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3>配置 Provider</h3>
-            {syncing && (
-              <div className="sync-progress">
-                <div className="sync-spinner"></div>
-                <span>授权模型同步中...</span>
-              </div>
-            )}
-            <div className="form">
-              <div className="field">
-                <label>名称</label>
-                <input
-                  value={form.name}
-                  readOnly
-                  disabled
-                />
-              </div>
-              <div className="field">
-                <label>Base URL</label>
-                <input
-                  value={form.endpoint}
-                  readOnly
-                  disabled
-                />
-              </div>
-              {currentApp === 'codex' && (
-                <div className="field">
-                  <label>上游协议</label>
-                  <select
-                    value={form.wireApi}
-                    onChange={(e) =>
-                      setForm((s) => ({
-                        ...s,
-                        wireApi: e.target.value as FormState['wireApi']
-                      }))
-                    }
-                  >
-                    <option value="chat_completions">
-                      Chat Completions（推荐，自动转 Responses）
-                    </option>
-                    <option value="responses">Responses 直连</option>
-                  </select>
-                </div>
-              )}
-              <div className="field">
-                <label>API Key</label>
-                <input
-                  type="password"
-                  value={form.apiKey}
-                  onChange={(e) =>
-                    setForm((s) => ({
-                      ...s,
-                      apiKey: e.target.value,
-                      // 用户手动修改 Key 时清除原始 Key，保存以新输入为准
-                      rawApiKey: e.target.value === s.apiKey ? s.rawApiKey : undefined
-                    }))
-                  }
-                  placeholder="sk-..."
-                />
-              </div>
-              <div className="actions">
-                <button className="btn" onClick={() => setShowForm(false)} disabled={syncing}>
-                  取消
-                </button>
-                <button
-                  className="btn"
-                  disabled={busy || syncing || !form.apiKey.trim()}
-                  onClick={async () => {
-                    setBusy(true)
-                    try {
-                      const testKey = form.apiKey.includes('****')
-                        ? form.rawApiKey || ''
-                        : form.apiKey.trim()
-                      if (!testKey) {
-                        showToast('请填写 API Key', true)
-                        return
-                      }
-                      const result: SpeedTestResult = await window.dst.speedTest(
-                        form.endpoint,
-                        testKey
-                      )
-                      if (result.ok) {
-                        showToast(`连接成功 ${result.latencyMs}ms`)
-                      } else {
-                        showToast(`连接失败：${result.error || result.status}`, true)
-                      }
-                    } catch (err) {
-                      showToast(err instanceof Error ? err.message : String(err), true)
-                    } finally {
-                      setBusy(false)
-                    }
-                  }}
-                >
-                  测试连接
-                </button>
-                <button
-                  className="btn primary"
-                  disabled={busy || syncing}
-                  onClick={saveForm}
-                >
-                  保存
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* 模型设置弹窗 */}
       {showModelSettings && editingModel && (
@@ -1324,115 +1263,6 @@ export default function App() {
         <div className={`toast ${toast.error ? 'error' : ''}`}>{toast.text}</div>
       )}
 
-      {showMcpForm && (
-        <div className="modal-backdrop" onClick={() => setShowMcpForm(false)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3>{editingMcp ? '编辑 MCP 服务' : '添加 MCP 服务'}</h3>
-            <div className="form">
-              <div className="field">
-                <label>名称</label>
-                <input
-                  value={mcpForm.name}
-                  onChange={(e) =>
-                    setMcpForm((s) => ({ ...s, name: e.target.value }))
-                  }
-                  placeholder="例如：Gemini 图片生成"
-                />
-              </div>
-              <div className="field">
-                <label>服务类型</label>
-                <select
-                  value={mcpForm.type}
-                  onChange={(e) =>
-                    setMcpForm((s) => ({ ...s, type: e.target.value as McpServiceType }))
-                  }
-                >
-                  <option value="image-generation">图片生成</option>
-                  <option value="text-generation">文本生成</option>
-                  <option value="custom">自定义</option>
-                </select>
-              </div>
-              <div className="field">
-                <label>服务商</label>
-                <select
-                  value={mcpForm.provider}
-                  onChange={(e) =>
-                    setMcpForm((s) => ({ ...s, provider: e.target.value as McpProvider }))
-                  }
-                >
-                  <option value="gemini-3-pro-image">Gemini 3 Pro Image</option>
-                  <option value="gpt-image-2">GPT Image 2</option>
-                  <option value="custom">自定义</option>
-                </select>
-              </div>
-              <div className="field">
-                <label>Base URL</label>
-                <input
-                  value={mcpForm.baseUrl}
-                  onChange={(e) =>
-                    setMcpForm((s) => ({ ...s, baseUrl: e.target.value }))
-                  }
-                  placeholder="https://api.example.com"
-                />
-              </div>
-              <div className="field">
-                <label>模型 ID</label>
-                <input
-                  value={mcpForm.modelId}
-                  onChange={(e) =>
-                    setMcpForm((s) => ({ ...s, modelId: e.target.value }))
-                  }
-                  placeholder="gemini-3-pro-image 或 gpt-image-2"
-                />
-              </div>
-              <div className="field">
-                <label>API Key</label>
-                <input
-                  type="password"
-                  value={mcpForm.apiKey}
-                  onChange={(e) =>
-                    setMcpForm((s) => ({ ...s, apiKey: e.target.value }))
-                  }
-                  placeholder="sk-..."
-                />
-              </div>
-              <div className="actions">
-                <button className="btn" onClick={() => setShowMcpForm(false)}>
-                  取消
-                </button>
-                <button
-                  className="btn primary"
-                  disabled={busy}
-                  onClick={saveMcpForm}
-                >
-                  保存
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── Built-in Image Generation: Connection Info ── */}
-      {showConnInfo && connInfo && (
-        <div className="modal-backdrop" onClick={() => setShowConnInfo(false)}>
-          <div className="modal conn-modal" onClick={(e) => e.stopPropagation()}>
-            <h3>MCP 连接信息</h3>
-            <p className="conn-hint">
-              将以下 JSON 配置给任意支持 MCP 的客户端（如 Claude Desktop、Cherry Studio、Codex 等）。
-            </p>
-            <pre className="conn-pre">{connInfo.text}</pre>
-            <div className="actions">
-              <button className="btn" onClick={() => setShowConnInfo(false)}>
-                关闭
-              </button>
-              <button className="btn primary" onClick={copyConnInfo}>
-                {copied ? '✓ 已复制' : '一键复制'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

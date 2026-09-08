@@ -7,6 +7,7 @@ import {
   deleteProvider,
   getDataDir,
   getSettings,
+  getDstConnection,
   listProviders,
   updateProvider,
   updateSettings,
@@ -15,7 +16,6 @@ import {
   createMcpService,
   updateMcpService,
   deleteMcpService,
-  markMcpServiceEnabled,
   markMcpServiceRunning,
   getMcpConnectionInfo,
   listModels,
@@ -26,7 +26,7 @@ import {
   saveModelsFromApi,
   getLastSyncAt
 } from './store'
-import { enableProvider, enableModel as enableModelForApp } from './switcher'
+import { enableProvider, enableModel as enableModelForApp, applyMcpToApp } from './switcher'
 import { fetchModels, speedTest } from './speedtest'
 import { rebuildTrayMenu } from './tray'
 import { parseDeepLink } from '../shared/url'
@@ -37,6 +37,8 @@ import {
   getUpdateState,
   quitAndInstall
 } from './update'
+import { applyLaunchAtLogin } from './login'
+import { getGithubAccelerationStatus, setGithubAcceleration } from './github-accelerator'
 
 export function registerIpc(getMainWindow: () => BrowserWindow | null): void {
   ipcMain.handle('apps:list', async () => {
@@ -101,7 +103,17 @@ export function registerIpc(getMainWindow: () => BrowserWindow | null): void {
   )
 
   ipcMain.handle('settings:get', () => getSettings())
-  ipcMain.handle('settings:update', (_e, patch) => updateSettings(patch))
+  ipcMain.handle('github-acceleration:get', () => getGithubAccelerationStatus())
+  ipcMain.handle('github-acceleration:toggle', (_e, enabled: boolean) =>
+    setGithubAcceleration(Boolean(enabled))
+  )
+  ipcMain.handle('settings:update', (_e, patch) => {
+    const next = updateSettings(patch)
+    if (typeof patch?.launchAtLogin === 'boolean') {
+      applyLaunchAtLogin(patch.launchAtLogin)
+    }
+    return next
+  })
   ipcMain.handle('system:dataDir', () => getDataDir())
   ipcMain.handle('system:appMeta', () => APP_META)
   ipcMain.handle('system:version', () => app.getVersion())
@@ -163,25 +175,24 @@ export function registerIpc(getMainWindow: () => BrowserWindow | null): void {
     return true
   })
 
-  ipcMain.handle('mcp:enable', (_e, id: string, enabled: boolean) => {
-    return markMcpServiceEnabled(id, enabled)
+  ipcMain.handle('mcp:enable', async (_e, id: string, enabled: boolean, app: AppId) => {
+    return applyMcpToApp(app, id, enabled)
   })
 
   ipcMain.handle('mcp:start', async (_e, id: string, app?: AppId) => {
     const service = getMcpService(id)
     if (!service) throw new Error('MCP Service not found')
-    // 复用当前应用 Provider 的连接信息（endpoint / apiKey）
-    const provider = app ? listProviders(app)[0] : listProviders()[0]
-    if (!provider) {
-      throw new Error('请先在「配置 Provider」中配置连接信息')
-    }
-    if (!provider.apiKey.trim()) {
-      throw new Error('请在「配置 Provider」中填写 API Key')
+    const conn = getDstConnection()
+    const provider = app ? listProviders(app)[0] : undefined
+    const endpoint = conn.apiKey ? conn.endpoint : provider?.endpoint
+    const apiKey = conn.apiKey || provider?.apiKey || ''
+    if (!apiKey.trim()) {
+      throw new Error('请先在设置中配置 Provider 并填写 API Key')
     }
     const serviceWithConn: McpService = {
       ...service,
-      baseUrl: provider.endpoint,
-      apiKey: provider.apiKey
+      baseUrl: endpoint || 'https://dst-ai.com',
+      apiKey
     }
     const result = await launchMcpService(serviceWithConn)
     if (!result.ok) throw new Error(result.error || '启动失败')

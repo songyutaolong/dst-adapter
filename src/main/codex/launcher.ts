@@ -4,9 +4,7 @@ import path from 'path'
 import { execFile, execFileSync, spawn } from 'child_process'
 import { promisify } from 'util'
 import type { Provider } from '../../shared/types'
-import { injectCodexTarget } from './cdp'
 
-const DEBUG_PORT = 9229
 const execFileAsync = promisify(execFile)
 
 export function codexExecutableCandidates(): string[] {
@@ -37,8 +35,19 @@ type StorePackageInfo = {
   executable: string
 }
 
+let storePackageCache: StorePackageInfo | null | undefined
+let storePackageCacheAt = 0
+const STORE_PACKAGE_CACHE_MS = 30_000
+
 function storePackageInfo(): StorePackageInfo | null {
   if (process.platform !== 'win32') return null
+  if (
+    storePackageCache !== undefined &&
+    Date.now() - storePackageCacheAt < STORE_PACKAGE_CACHE_MS
+  ) {
+    return storePackageCache
+  }
+
   try {
     const output = execFileSync(
       'powershell.exe',
@@ -51,7 +60,11 @@ function storePackageInfo(): StorePackageInfo | null {
       { encoding: 'utf-8', windowsHide: true }
     ).trim()
     const [fullName, familyName, installLocation] = output.split('|')
-    if (!fullName || !familyName || !installLocation) return null
+    if (!fullName || !familyName || !installLocation) {
+      storePackageCache = null
+      storePackageCacheAt = Date.now()
+      return null
+    }
 
     const candidates = [
       path.join(installLocation, 'app', 'ChatGPT.exe'),
@@ -66,8 +79,12 @@ function storePackageInfo(): StorePackageInfo | null {
         }
       }) || candidates[0]
 
-    return { fullName, familyName, installLocation, executable }
+    storePackageCache = { fullName, familyName, installLocation, executable }
+    storePackageCacheAt = Date.now()
+    return storePackageCache
   } catch {
+    storePackageCache = null
+    storePackageCacheAt = Date.now()
     return null
   }
 }
@@ -119,8 +136,7 @@ async function quitCodexProcesses(): Promise<void> {
 }
 
 async function activateStoreCodex(
-  aumid: string,
-  args: string[]
+  aumid: string
 ): Promise<void> {
   const source = `
 using System;
@@ -155,10 +171,9 @@ public static class DasuantouAppActivator {
 }`
   const escapedSource = source.replace(/'/g, "''")
   const appId = aumid.replace(/'/g, "''")
-  const activationArgs = args.join(' ').replace(/'/g, "''")
   const command = [
     `Add-Type -TypeDefinition '${escapedSource}'`,
-    `[void][DasuantouAppActivator]::Launch('${appId}','${activationArgs}')`
+    `[void][DasuantouAppActivator]::Launch('${appId}','')`
   ].join(';')
   const encoded = Buffer.from(command, 'utf16le').toString('base64')
   await execFileAsync(
@@ -183,26 +198,6 @@ export function isCodexInstalled(): boolean {
   )
 }
 
-async function waitForTargets(timeoutMs = 20000): Promise<any[]> {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(`http://127.0.0.1:${DEBUG_PORT}/json`)
-      if (response.ok) {
-        const targets = (await response.json()) as any[]
-        const pages = targets.filter(
-          (target) => target.type === 'page' && target.webSocketDebuggerUrl
-        )
-        if (pages.length) return pages
-      }
-    } catch {
-      // Codex is still starting.
-    }
-    await new Promise((resolve) => setTimeout(resolve, 500))
-  }
-  return []
-}
-
 async function spawnDetached(
   executable: string,
   args: string[],
@@ -223,9 +218,8 @@ async function spawnDetached(
 }
 
 export async function launchCodex(
-  provider: Provider,
-  enhancements: boolean
-): Promise<{ injected: boolean; executable: string }> {
+  provider: Provider
+): Promise<{ executable: string }> {
   const store = storePackageInfo()
   const unpackaged = codexExecutableCandidates().find((candidate) =>
     fs.existsSync(candidate)
@@ -236,20 +230,13 @@ export async function launchCodex(
   const apiKey = provider.apiKey.trim()
   setUserOpenAiKey(apiKey)
 
-  const args = enhancements
-    ? [
-        `--remote-debugging-port=${DEBUG_PORT}`,
-        `--remote-allow-origins=http://127.0.0.1:${DEBUG_PORT}`,
-        '--remote-allow-origins=*'
-      ]
-    : []
   const env = {
     ...process.env,
     OPENAI_API_KEY: apiKey,
     CODEX_API_KEY: apiKey
   }
 
-  // Existing instances ignore new Chromium flags and keep the old env.
+  // Existing instances keep the old env; restart to load the new API config.
   await quitCodexProcesses()
 
   let launched = false
@@ -259,7 +246,7 @@ export async function launchCodex(
     const aumids = [`${store.familyName}!App`, `${store.fullName}!App`]
     for (const aumid of aumids) {
       try {
-        await activateStoreCodex(aumid, args)
+        await activateStoreCodex(aumid)
         launched = true
         launchedPath = store.installLocation
         break
@@ -271,7 +258,7 @@ export async function launchCodex(
 
   if (!launched) {
     try {
-      await spawnDetached(executable, args, env)
+      await spawnDetached(executable, [], env)
       launched = true
       launchedPath = executable
     } catch (error) {
@@ -283,36 +270,8 @@ export async function launchCodex(
       )
       launched = true
       launchedPath = store.installLocation
-      if (enhancements) {
-        return { injected: false, executable: launchedPath }
-      }
     }
   }
 
-  if (!enhancements) return { injected: false, executable: launchedPath }
-
-  const targets = await waitForTargets()
-  if (!targets.length) {
-    return { injected: false, executable: launchedPath }
-  }
-
-  // Give the first paint a moment, then inject twice so late React trees are covered.
-  await new Promise((resolve) => setTimeout(resolve, 1200))
-  try {
-    const pages = await waitForTargets(5000)
-    const list = pages.length ? pages : targets
-    await Promise.all(
-      list.map((target) => injectCodexTarget(target.webSocketDebuggerUrl))
-    )
-    await new Promise((resolve) => setTimeout(resolve, 1500))
-    const again = await waitForTargets(3000)
-    if (again.length) {
-      await Promise.all(
-        again.map((target) => injectCodexTarget(target.webSocketDebuggerUrl))
-      )
-    }
-    return { injected: true, executable: launchedPath }
-  } catch {
-    return { injected: false, executable: launchedPath }
-  }
+  return { executable: launchedPath }
 }

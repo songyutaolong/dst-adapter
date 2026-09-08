@@ -67,14 +67,91 @@ function isGeminiModel(model: string): boolean {
   return model === 'gemini-3-pro-image'
 }
 
+/** Gemini 图片模型支持的宽高比白名单（官方 API：generationConfig.imageConfig.aspectRatio）。 */
+const GEMINI_ASPECT_RATIOS = ['1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9'] as const
+
+/** Gemini 图片模型支持的分辨率档位白名单（官方 API：generationConfig.imageConfig.imageSize，按长边）。 */
+const GEMINI_IMAGE_SIZES = ['1K', '2K', '4K'] as const
+
+/** 将 OpenAI 风格尺寸（如 "1024x1024"）映射为 Gemini 宽高比 + 分辨率档位。无法解析/匹配时返回 null。 */
+function resolveGeminiAspectAndSize(size: string): { aspectRatio: string; imageSize: string } | null {
+  const m = /^(\d+)\s*[xX*]\s*(\d+)$/.exec(size.trim())
+  if (!m) return null
+  const w = Number(m[1])
+  const h = Number(m[2])
+  if (w <= 0 || h <= 0) return null
+
+  // 在白名单中找与目标比例最接近的（相对误差 ≤ 5%）
+  const target = w / h
+  let best: { ratio: string; err: number } | null = null
+  for (const ratio of GEMINI_ASPECT_RATIOS) {
+    const [a, b] = ratio.split(':').map(Number)
+    const err = Math.abs(a / b - target) / target
+    if (!best || err < best.err) best = { ratio, err }
+  }
+  if (!best || best.err > 0.05) return null
+
+  // 长边 → 分辨率档位：1K=1024 / 2K=2048 / 4K=4096（约）
+  const longEdge = Math.max(w, h)
+  let imageSize: string = '1K'
+  if (longEdge >= 3000) imageSize = '4K'
+  else if (longEdge >= 1300) imageSize = '2K'
+
+  return { aspectRatio: best.ratio, imageSize }
+}
+
+/**
+ * 解析 Gemini 图片生成配置（统一走 size 字段，可与 aspectRatio 组合）：
+ * - size 支持两种语法：档位 1K/2K/4K（直写 imageSize），或像素 WxH（如 1024x1024，映射宽高比+档位）
+ * - aspectRatio 独立提供（如 16:9），可单独使用或与 size 档位组合
+ * - 均未提供/非法时返回 undefined（走 Gemini API 默认 1:1 / 1K）
+ */
+function resolveGeminiImageConfig(params?: Record<string, unknown>): Record<string, string> | undefined {
+  const p = params || {}
+  let aspectRatio = typeof p.aspectRatio === 'string' ? p.aspectRatio.trim() : ''
+  if (aspectRatio && !(GEMINI_ASPECT_RATIOS as readonly string[]).includes(aspectRatio)) aspectRatio = ''
+
+  let imageSize = ''
+  const sizeParam = typeof p.size === 'string' ? p.size.trim() : ''
+  if (sizeParam && (GEMINI_IMAGE_SIZES as readonly string[]).includes(sizeParam)) {
+    // 档位直配：1K / 2K / 4K
+    imageSize = sizeParam
+  } else if (sizeParam) {
+    // 像素格式：映射宽高比 + 档位
+    const mapped = resolveGeminiAspectAndSize(sizeParam)
+    if (mapped) {
+      console.log(`[mcp] Gemini size "${sizeParam}" → aspectRatio=${mapped.aspectRatio}, imageSize=${mapped.imageSize}`)
+      if (!aspectRatio) aspectRatio = mapped.aspectRatio
+      if (!imageSize) imageSize = mapped.imageSize
+    }
+  }
+
+  if (!aspectRatio && !imageSize) return undefined
+  const config: Record<string, string> = {}
+  if (aspectRatio) config.aspectRatio = aspectRatio
+  if (imageSize) config.imageSize = imageSize
+  return config
+}
+
+/** 将 Gemini 档位（1K/2K/4K）转为 OpenAI 像素尺寸（1:1 基准；4K 受官方单边 3840px / 总像素上限约束，取 16:9 满幅）。非档位值原样返回。 */
+function normalizeOpenAiSize(size: string): string {
+  const s = size.trim()
+  if (s === '1K' || s === '1k') return '1024x1024'
+  if (s === '2K' || s === '2k') return '2048x2048'
+  if (s === '4K' || s === '4k') return '3840x2160'
+  return s
+}
+
 /** 调用 Gemini 原生 API 生成图片 */
 async function generateImageGemini(
   service: McpService,
   model: string,
-  prompt: string
+  prompt: string,
+  params?: Record<string, unknown>
 ): Promise<unknown> {
   const endpoint = `${service.baseUrl.replace(/\/+$/, '')}/v1beta/models/${model}:generateContent`
-  const body = {
+  const imageConfig = resolveGeminiImageConfig(params)
+  const body: Record<string, unknown> = {
     contents: [
       {
         parts: [
@@ -87,6 +164,9 @@ async function generateImageGemini(
     generationConfig: {
       responseModalities: ['IMAGE', 'TEXT']
     }
+  }
+  if (imageConfig) {
+    ;(body.generationConfig as Record<string, unknown>).imageConfig = imageConfig
   }
 
   const resp = await fetch(endpoint, {
@@ -142,7 +222,7 @@ async function generateImage(
 
   // Gemini 模型走原生 API
   if (isGeminiModel(model)) {
-    return generateImageGemini(service, model, prompt)
+    return generateImageGemini(service, model, prompt, params)
   }
 
   // 其他模型走 OpenAI 兼容 API
@@ -152,7 +232,7 @@ async function generateImage(
     n: typeof params?.n === 'number' ? params.n : 1
   }
   const size = params?.size
-  if (typeof size === 'string' && size.trim()) body.size = size.trim()
+  if (typeof size === 'string' && size.trim()) body.size = normalizeOpenAiSize(size)
   // quality：仅白名单取值，缺省/非法值回退 medium
   const quality = params?.quality
   body.quality = typeof quality === 'string' && ['low', 'medium', 'high'].includes(quality) ? quality : 'medium'
@@ -236,7 +316,8 @@ async function editImageGemini(
   service: McpService,
   model: string,
   prompt: string,
-  images: DecodedImage[]
+  images: DecodedImage[],
+  params?: Record<string, unknown>
 ): Promise<unknown> {
   const endpoint = `${service.baseUrl.replace(/\/+$/, '')}/v1beta/models/${model}:generateContent`
 
@@ -249,7 +330,8 @@ async function editImageGemini(
   }))
   parts.push({ text: prompt })
 
-  const body = {
+  const imageConfig = resolveGeminiImageConfig(params)
+  const body: Record<string, unknown> = {
     contents: [
       {
         parts
@@ -258,6 +340,9 @@ async function editImageGemini(
     generationConfig: {
       responseModalities: ['IMAGE', 'TEXT']
     }
+  }
+  if (imageConfig) {
+    ;(body.generationConfig as Record<string, unknown>).imageConfig = imageConfig
   }
 
   const resp = await fetch(endpoint, {
@@ -314,7 +399,7 @@ async function editImage(
 
   // Gemini 模型走原生 API
   if (isGeminiModel(model)) {
-    return editImageGemini(service, model, prompt, images)
+    return editImageGemini(service, model, prompt, images, params)
   }
 
   // 其他模型走 OpenAI 兼容 API（images/edits 支持多 image 字段）
@@ -325,7 +410,7 @@ async function editImage(
     fd.append('image', new Blob([img.buffer], { type: img.mime }), img.filename)
   }
   const size = params?.size
-  if (typeof size === 'string' && size.trim()) fd.append('size', size.trim())
+  if (typeof size === 'string' && size.trim()) fd.append('size', normalizeOpenAiSize(size))
   const n = params?.n
   if (typeof n === 'number') fd.append('n', String(n))
   // quality：仅白名单取值，缺省/非法值回退 medium
@@ -413,12 +498,12 @@ async function generateVideo(
     metadata.resolution = resolution.trim()
   }
 
-  // 可选参数：duration（兼容旧参数名 seconds；合法性校验：4-15 整数或 -1）
+  // 可选参数：seconds（对外唯一时长参数；仍兼容历史客户端显式传 duration；合法性校验：4-15 整数或 -1）
   const seconds = params?.seconds ?? params?.duration
   if (typeof seconds === 'number') {
     const secInt = Math.floor(seconds)
     if (secInt !== -1 && (secInt < 4 || secInt > 15)) {
-      throw { code: -32602, message: 'seconds/duration 必须为 4-15 的整数，或 -1（模型自动选择时长）' } as JsonRpcError
+      throw { code: -32602, message: 'seconds 必须为 4-15 的整数，或 -1（模型自动选择时长）' } as JsonRpcError
     }
     metadata.duration = secInt
   }
@@ -561,12 +646,12 @@ async function generateVideoFromImage(
     metadata.resolution = resolution.trim()
   }
 
-  // 可选参数：duration（兼容旧参数名 seconds；合法性校验：4-15 整数或 -1）
+  // 可选参数：seconds（对外唯一时长参数；仍兼容历史客户端显式传 duration；合法性校验：4-15 整数或 -1）
   const seconds = params?.seconds ?? params?.duration
   if (typeof seconds === 'number') {
     const secInt = Math.floor(seconds)
     if (secInt !== -1 && (secInt < 4 || secInt > 15)) {
-      throw { code: -32602, message: 'seconds/duration 必须为 4-15 的整数，或 -1（模型自动选择时长）' } as JsonRpcError
+      throw { code: -32602, message: 'seconds 必须为 4-15 的整数，或 -1（模型自动选择时长）' } as JsonRpcError
     }
     metadata.duration = secInt
   }
@@ -660,7 +745,16 @@ function listTools(serviceType: string): unknown[] {
               description: '模型 ID，缺省使用默认模型'
             },
             n: { type: 'integer', description: '生成数量，默认 1' },
-            size: { type: 'string', description: '图片尺寸，如 1024x1024' },
+            size: {
+              type: 'string',
+              description:
+                '图片尺寸：像素格式如 1024x1024，或档位 1K/2K/4K（Gemini 档位直写；OpenAI 档位转像素，4K→3840x2160）'
+            },
+            aspectRatio: {
+              type: 'string',
+              enum: GEMINI_ASPECT_RATIOS,
+              description: 'Gemini 图片宽高比：1:1、16:9、9:16 等，仅 Gemini 模型生效'
+            },
             quality: {
               type: 'string',
               enum: ['low', 'medium', 'high'],
@@ -690,7 +784,16 @@ function listTools(serviceType: string): unknown[] {
               description: '模型 ID，缺省使用默认模型'
             },
             n: { type: 'integer', description: '生成数量，默认 1' },
-            size: { type: 'string', description: '图片尺寸，如 1024x1024' },
+            size: {
+              type: 'string',
+              description:
+                '图片尺寸：像素格式如 1024x1024，或档位 1K/2K/4K（Gemini 档位直写；OpenAI 档位转像素，4K→3840x2160）'
+            },
+            aspectRatio: {
+              type: 'string',
+              enum: GEMINI_ASPECT_RATIOS,
+              description: 'Gemini 图片宽高比：1:1、16:9、9:16 等，仅 Gemini 模型生效'
+            },
             quality: {
               type: 'string',
               enum: ['low', 'medium', 'high'],
@@ -723,10 +826,6 @@ function listTools(serviceType: string): unknown[] {
             seconds: {
               type: 'integer',
               description: '视频时长（秒）：4-15 的整数，或 -1（模型自动选择）'
-            },
-            duration: {
-              type: 'integer',
-              description: '视频时长（秒）别名，与 seconds 等价：4-15 的整数，或 -1（模型自动选择）'
             },
             ratio: {
               type: 'string',
@@ -794,10 +893,6 @@ function listTools(serviceType: string): unknown[] {
             seconds: {
               type: 'integer',
               description: '视频时长（秒）：4-15 的整数，或 -1（模型自动选择）'
-            },
-            duration: {
-              type: 'integer',
-              description: '视频时长（秒）别名，与 seconds 等价：4-15 的整数，或 -1（模型自动选择）'
             },
             ratio: {
               type: 'string',

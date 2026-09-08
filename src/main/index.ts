@@ -9,12 +9,13 @@ import { existsSync } from 'fs'
 import { join } from 'path'
 import { registerIpc } from './ipc'
 import { createTray, rebuildTrayMenu } from './tray'
-import { createProvider, loadStore } from './store'
+import { createProvider, loadStore, getDstConnection, listMcpServices, markMcpServiceRunning } from './store'
 import { parseDeepLink } from '../shared/url'
 import type { AppId } from '../shared/types'
 import { stopCodexProxy } from './codex/proxy'
-import { launchMcpService } from './mcp/launcher'
+import { launchMcpService, getMcpRuntime } from './mcp/launcher'
 import { initUpdater } from './update'
+import { applyLaunchAtLogin } from './login'
 
 let mainWindow: BrowserWindow | null = null
 let pendingDeepLink: string | null = null
@@ -135,21 +136,28 @@ app.whenReady().then(async () => {
   createWindow()
   createTray(getMainWindow)
   initUpdater(getMainWindow)
-  // 自动更新已关闭：不自动联网检查，仅在用户点击左下角 ↻ 时手动检查
 
-  // 自动启动已启用的 MCP 服务
-  const store = loadStore()
-  console.log(`[MCP] Store loaded: ${store.mcpServices.length} services`)
-  for (const svc of store.mcpServices) {
-    console.log(`[MCP] Service: ${svc.id}, enabled=${svc.enabled}, type=${svc.type}`)
-    if (svc.enabled && svc.type === 'video-generation') {
-      console.log(`[MCP] Auto-starting ${svc.id}...`)
-      const result = await launchMcpService(svc)
-      if (result.ok) {
-        console.log(`[MCP] ${svc.id} started on port ${result.port}`)
-      } else {
-        console.error(`[MCP] ${svc.id} start failed: ${result.error}`)
-      }
+  applyLaunchAtLogin(loadStore().settings.launchAtLogin)
+
+  // 软件打开后自动启动内置 MCP HTTP 服务
+  const conn = getDstConnection()
+  const mcpList = listMcpServices()
+  for (const svc of mcpList.filter((s) => s.builtin)) {
+    if (getMcpRuntime(svc.id).running) continue
+    if (!conn.apiKey.trim()) {
+      console.warn(`[MCP] Skip auto-start ${svc.id}: Provider API Key 未配置`)
+      continue
+    }
+    const result = await launchMcpService({
+      ...svc,
+      baseUrl: conn.endpoint,
+      apiKey: conn.apiKey
+    })
+    if (result.ok) {
+      markMcpServiceRunning(svc.id, true, result.port)
+      console.log(`[MCP] ${svc.id} auto-started on port ${result.port}`)
+    } else {
+      console.error(`[MCP] ${svc.id} auto-start failed: ${result.error}`)
     }
   }
 

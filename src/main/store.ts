@@ -5,12 +5,13 @@ import { randomUUID } from 'crypto'
 import type { AppId, AppSettings, Provider, McpService, Model, ModelInfo, ModelConfig } from '../shared/types'
 import {
   DEFAULT_SETTINGS,
+  APP_META,
   BUILTIN_MCP_IMAGE_ID,
   BUILTIN_MCP_IMAGE_DEFAULTS,
   BUILTIN_MCP_VIDEO_ID,
   BUILTIN_MCP_VIDEO_DEFAULTS
 } from '../shared/types'
-import { getMcpRuntime } from './mcp/launcher'
+import { getMcpRuntime, getPortForService } from './mcp/launcher'
 
 export interface DataStore {
   version: number
@@ -221,9 +222,101 @@ export function getSettings(): AppSettings {
   return loadStore().settings
 }
 
+/** 把设置页中的共享连接信息同步成各应用的内部 Provider。 */
+function syncSharedProviders(store: DataStore): void {
+  const settings = store.settings
+  if (!settings.providerApiKey?.trim()) return
+
+  const connection = {
+    name: settings.providerName || 'dst',
+    endpoint: settings.providerEndpoint || 'https://dst-ai.com',
+    apiKey: settings.providerApiKey,
+    wireApi: settings.providerWireApi || 'chat_completions',
+    vendor: settings.providerVendor || 'dst'
+  }
+
+  const supportedApps = (Object.keys(APP_META) as AppId[]).filter(
+    (app) => APP_META[app].implemented
+  )
+
+  for (const app of supportedApps) {
+    let provider = store.providers.find((item) => item.app === app)
+    const now = new Date().toISOString()
+
+    if (!provider) {
+      provider = {
+        id: randomUUID(),
+        name: connection.name,
+        app,
+        endpoint: connection.endpoint,
+        apiKey: connection.apiKey,
+        wireApi: connection.wireApi,
+        vendor: connection.vendor,
+        supportsToolCall: true,
+        supportsImages: false,
+        supportsReasoning: false,
+        enabled: true,
+        createdAt: now,
+        updatedAt: now
+      }
+      store.providers.push(provider)
+    } else {
+      provider.name = connection.name
+      provider.endpoint = connection.endpoint
+      provider.apiKey = connection.apiKey
+      provider.wireApi = connection.wireApi
+      provider.vendor = connection.vendor
+      provider.updatedAt = now
+    }
+
+    const appProviders = store.providers.filter((item) => item.app === app)
+    if (!appProviders.some((item) => item.enabled)) {
+      provider.enabled = true
+    }
+  }
+}
+
+/** 设置页中的 DST 连接信息；若尚未写入设置则回退到已有 Provider。 */
+export function getDstConnection(): {
+  name: string
+  endpoint: string
+  apiKey: string
+  wireApi: 'responses' | 'chat_completions'
+  vendor: string
+} {
+  const settings = getSettings()
+  if (settings.providerApiKey?.trim()) {
+    return {
+      name: settings.providerName || 'dst',
+      endpoint: settings.providerEndpoint || 'https://dst-ai.com',
+      apiKey: settings.providerApiKey,
+      wireApi: settings.providerWireApi || 'chat_completions',
+      vendor: settings.providerVendor || 'dst'
+    }
+  }
+  const existing = listProviders()[0]
+  if (existing) {
+    return {
+      name: existing.name || 'dst',
+      endpoint: existing.endpoint,
+      apiKey: existing.apiKey,
+      wireApi: existing.wireApi || 'chat_completions',
+      vendor: existing.vendor || 'dst'
+    }
+  }
+  return {
+    name: settings.providerName || 'dst',
+    endpoint: settings.providerEndpoint || 'https://dst-ai.com',
+    apiKey: '',
+    wireApi: settings.providerWireApi || 'chat_completions',
+    vendor: settings.providerVendor || 'dst'
+  }
+}
+
 export function updateSettings(patch: Partial<AppSettings>): AppSettings {
   const store = loadStore()
   store.settings = { ...store.settings, ...patch }
+  syncSharedProviders(store)
   saveStore(store)
   return store.settings
 }
@@ -280,6 +373,7 @@ function builtinMcpImageService(): McpService {
     baseUrl: BUILTIN_MCP_IMAGE_DEFAULTS.baseUrl,
     modelId: BUILTIN_MCP_IMAGE_DEFAULTS.models[0],
     apiKey: '',
+    enabledApps: [],
     enabled: false,
     running: false,
     builtin: true,
@@ -299,6 +393,7 @@ function builtinMcpVideoService(): McpService {
     baseUrl: BUILTIN_MCP_VIDEO_DEFAULTS.baseUrl,
     modelId: BUILTIN_MCP_VIDEO_DEFAULTS.models[0],
     apiKey: '',
+    enabledApps: [],
     enabled: false,
     running: false,
     builtin: true,
@@ -311,6 +406,8 @@ export function listMcpServices(): McpService[] {
   const store = loadStore()
   let changed = false
 
+  const validApps = new Set(Object.keys(APP_META) as AppId[])
+
   // 确保图片生成服务存在
   const builtinImage = store.mcpServices.find((s) => s.id === BUILTIN_MCP_IMAGE_ID)
   if (!builtinImage) {
@@ -320,6 +417,28 @@ export function listMcpServices(): McpService[] {
     builtinImage.modelId = BUILTIN_MCP_IMAGE_DEFAULTS.models[0]
     builtinImage.updatedAt = new Date().toISOString()
     changed = true
+  }
+
+  for (const service of store.mcpServices) {
+    if (!Array.isArray(service.enabledApps)) {
+      // 旧版本只有一个全局 enabled；当前存量数据来自 WorkBuddy 页面。
+      service.enabledApps = service.enabled ? ['workbuddy'] : []
+      changed = true
+    } else {
+      const enabledApps = [...new Set(service.enabledApps)].filter((app) =>
+        validApps.has(app)
+      )
+      if (enabledApps.length !== service.enabledApps.length) {
+        changed = true
+      }
+      service.enabledApps = enabledApps
+    }
+
+    const enabled = service.enabledApps.length > 0
+    if (service.enabled !== enabled) {
+      service.enabled = enabled
+      changed = true
+    }
   }
 
   // 确保视频生成服务存在
@@ -365,6 +484,7 @@ export function createMcpService(
     baseUrl: input.baseUrl,
     modelId: input.modelId,
     apiKey: input.apiKey,
+    enabledApps: [],
     enabled: false,
     running: false,
     createdAt: now,
@@ -406,13 +526,25 @@ export function deleteMcpService(id: string): void {
   saveStore(store)
 }
 
-export function markMcpServiceEnabled(id: string, enabled: boolean): McpService {
+export function markMcpServiceEnabled(
+  id: string,
+  app: AppId,
+  enabled: boolean
+): McpService {
   const store = loadStore()
   const idx = store.mcpServices.findIndex((s) => s.id === id)
   if (idx < 0) throw new Error('MCP Service not found')
+  const enabledApps = new Set(store.mcpServices[idx].enabledApps || [])
+  if (enabled) {
+    enabledApps.add(app)
+  } else {
+    enabledApps.delete(app)
+  }
+
   store.mcpServices[idx] = {
     ...store.mcpServices[idx],
-    enabled,
+    enabledApps: [...enabledApps],
+    enabled: enabledApps.size > 0,
     updatedAt: new Date().toISOString()
   }
   saveStore(store)
@@ -433,22 +565,17 @@ export function markMcpServiceRunning(id: string, running: boolean, port?: numbe
   return store.mcpServices[idx]
 }
 
-/** 生成 MCP 服务连接信息（用于「复制配置信息」）。 */
-export function getMcpConnectionInfo(id: string): { text: string; json: Record<string, unknown> } {
+/** 生成 MCP 服务连接信息（固定端口，不要求当前已在运行）。 */
+export function getMcpConnectionInfo(id: string): {
+  text: string
+  json: Record<string, unknown>
+  key: string
+} {
   const service = getMcpService(id)
   if (!service) throw new Error('MCP Service not found')
-  // store 中的 running/port 每次 load 都会被清空（会话级状态），必须以运行时为准
   const runtime = getMcpRuntime(id)
-  if (!runtime.running || !runtime.port) {
-    throw new Error('MCP 服务未运行，请先启动该服务后再复制配置')
-  }
-
-  // 导出本地 MCP 代理地址：客户端接入 127.0.0.1:<port>，由本应用转发上游并注入 API Key，
-  // 因此不导出上游 baseUrl / apiKey / 远端 endpoint。
-  const localUrl = `http://127.0.0.1:${runtime.port}`
-  // 标准 MCP 客户端（WorkBuddy / Cursor / Cline 等）只识别传输类型 type 与连接地址 url；
-  // key 用 ASCII 别名，避免中文 server 名进入工具名（mcp__<server>__<tool>）导致客户端解析失败；
-  // 中文显示名放在 value.name 字段。内部字段（baseUrl / provider / image-generation 等）不得外泄。
+  const port = runtime.port || getPortForService(id)
+  const localUrl = `http://127.0.0.1:${port}`
   let key: string
   if (service.builtin) {
     key = service.id === BUILTIN_MCP_IMAGE_ID ? 'dst-image-mcp' : 'dst-video-mcp'
@@ -462,6 +589,7 @@ export function getMcpConnectionInfo(id: string): { text: string; json: Record<s
   }
   return {
     json,
+    key,
     text: JSON.stringify({ mcpServers: { [key]: json } }, null, 2)
   }
 }

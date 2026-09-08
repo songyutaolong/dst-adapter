@@ -10,6 +10,8 @@ import type {
   Model,
   ModelConfig,
   SyncModelsResult,
+  GithubAccelerationResult,
+  GithubAccelerationStatus,
   UpdateState
 } from '../shared/types'
 
@@ -41,13 +43,17 @@ const api = {
   ): Promise<{ ok: boolean; models: string[]; error?: string }> =>
     ipcRenderer.invoke('providers:fetchModels', endpoint, apiKey),
   getSettings: (): Promise<AppSettings> => ipcRenderer.invoke('settings:get'),
+  getGithubAccelerationStatus: (): Promise<GithubAccelerationStatus> =>
+    ipcRenderer.invoke('github-acceleration:get'),
+  toggleGithubAcceleration: (enabled: boolean): Promise<GithubAccelerationResult> =>
+    ipcRenderer.invoke('github-acceleration:toggle', enabled),
   updateSettings: (patch: Partial<AppSettings>): Promise<AppSettings> =>
     ipcRenderer.invoke('settings:update', patch),
   getDataDir: (): Promise<string> => ipcRenderer.invoke('system:dataDir'),
   getVersion: (): Promise<string> => ipcRenderer.invoke('system:version'),
   launchApp: (
     app: AppId
-  ): Promise<{ ok?: boolean; injected?: boolean; message?: string }> =>
+  ): Promise<{ ok?: boolean; message?: string }> =>
     ipcRenderer.invoke('adapters:launch', app),
   downloadApp: (app: AppId): Promise<boolean> =>
     ipcRenderer.invoke('apps:download', app),
@@ -70,8 +76,8 @@ const api = {
   ): Promise<McpService> => ipcRenderer.invoke('mcp:update', id, patch),
   deleteMcpService: (id: string): Promise<boolean> =>
     ipcRenderer.invoke('mcp:delete', id),
-  enableMcpService: (id: string, enabled: boolean): Promise<McpService> =>
-    ipcRenderer.invoke('mcp:enable', id, enabled),
+  enableMcpService: (id: string, enabled: boolean, app: AppId): Promise<ApplyResult> =>
+    ipcRenderer.invoke('mcp:enable', id, enabled, app),
   startMcpService: (id: string, app?: AppId): Promise<McpService> =>
     ipcRenderer.invoke('mcp:start', id, app),
   stopMcpService: (id: string): Promise<McpService> =>

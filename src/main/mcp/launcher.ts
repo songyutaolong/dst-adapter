@@ -19,7 +19,7 @@ export interface McpLaunchResult {
 }
 
 /** 根据服务 ID 获取对应端口 */
-function getPortForService(serviceId: string): number {
+export function getPortForService(serviceId: string): number {
   if (serviceId === BUILTIN_MCP_IMAGE_ID) return BUILTIN_MCP_IMAGE_PORT
   if (serviceId === BUILTIN_MCP_VIDEO_ID) return BUILTIN_MCP_VIDEO_PORT
   return MCP_DEFAULT_PORT

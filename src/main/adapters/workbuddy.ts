@@ -5,7 +5,7 @@ import { shell } from 'electron'
 import type { ApplyResult, DetectResult, Provider } from '../../shared/types'
 import { providerToWorkBuddyModel } from '../../shared/url'
 import { atomicWriteText, backupFile } from '../store'
-import type { AppAdapter } from './types'
+import type { AppAdapter, McpServerEntry } from './types'
 
 type WorkBuddyModel = ReturnType<typeof providerToWorkBuddyModel>
 
@@ -15,6 +15,10 @@ function homeWorkbuddyDir(): string {
 
 function modelsPath(): string {
   return path.join(homeWorkbuddyDir(), 'models.json')
+}
+
+function mcpPath(): string {
+  return path.join(homeWorkbuddyDir(), 'mcp.json')
 }
 
 function findInstallDirs(): string[] {
@@ -97,6 +101,49 @@ async function writeLive(provider: Provider): Promise<ApplyResult> {
   }
 }
 
+async function writeMcp(
+  merge: Record<string, McpServerEntry>,
+  removeKeys: string[] = []
+): Promise<ApplyResult> {
+  const file = mcpPath()
+  const dir = homeWorkbuddyDir()
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true })
+  }
+
+  const backupPath = backupFile('workbuddy', file)
+  let servers: Record<string, McpServerEntry> = {}
+  if (fs.existsSync(file)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(file, 'utf-8')) as {
+        mcpServers?: Record<string, McpServerEntry>
+      }
+      if (parsed && parsed.mcpServers && typeof parsed.mcpServers === 'object') {
+        servers = { ...parsed.mcpServers }
+      }
+    } catch {
+      servers = {}
+    }
+  }
+
+  servers = { ...servers, ...merge }
+  for (const key of removeKeys) {
+    delete servers[key]
+  }
+
+  atomicWriteText(file, `${JSON.stringify({ mcpServers: servers }, null, 2)}\n`)
+  const merged = Object.keys(merge)
+  const removed = removeKeys.filter((k) => !merged.includes(k))
+  return {
+    ok: true,
+    message:
+      removed.length > 0
+        ? `已从 WorkBuddy mcp.json 移除 ${removed.join(', ')}`
+        : `已合并 MCP 配置到 WorkBuddy mcp.json（${merged.join(', ') || '无'}）`,
+    backupPath
+  }
+}
+
 async function launch(): Promise<void> {
   if (process.platform === 'darwin') {
     await shell.openPath('/Applications/WorkBuddy.app')
@@ -131,5 +178,6 @@ export const workbuddyAdapter: AppAdapter = {
   detect,
   readLive,
   writeLive,
+  writeMcp,
   launch
 }

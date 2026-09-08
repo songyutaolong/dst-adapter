@@ -3,14 +3,14 @@ import os from 'os'
 import path from 'path'
 import type { ApplyResult, DetectResult, Provider } from '../../shared/types'
 import { toOpenAiRoot } from '../../shared/url'
-import { atomicWriteText, backupFile, getSettings, listProviders } from '../store'
+import { atomicWriteText, backupFile, listProviders } from '../store'
 import {
   findCodexExecutable,
   isCodexInstalled,
   launchCodex
 } from '../codex/launcher'
 import { startCodexProxy } from '../codex/proxy'
-import type { AppAdapter } from './types'
+import type { AppAdapter, McpServerEntry } from './types'
 
 function codexDir(): string {
   return path.join(os.homedir(), '.codex')
@@ -18,6 +18,45 @@ function codexDir(): string {
 
 function configPath(): string {
   return path.join(codexDir(), 'config.toml')
+}
+
+function managedTomlSection(key: string, server: McpServerEntry): string {
+  return [
+    '# dasuantou-managed',
+    `[mcp_servers.${tomlString(key)}]`,
+    `url = ${tomlString(server.url)}`
+  ].join('\n')
+}
+
+function stripManagedMcpSections(raw: string, keys: string[] = []): string {
+  const removeSet = new Set(keys)
+  const lines = raw.split(/\r?\n/)
+  const result: string[] = []
+  let skipping = false
+
+  for (const line of lines) {
+    const section =
+      /^\s*\[mcp_servers\.(?:"([^"]+)"|([A-Za-z0-9_-]+))\s*\]\s*$/.exec(
+        line
+      )
+    if (section) {
+      skipping = removeSet.has(section[1] || section[2] || '')
+      if (skipping) {
+        const previous = result[result.length - 1]
+        if (previous && /^\s*#\s*dasuantou-managed\s*$/.test(previous)) {
+          result.pop()
+        }
+        continue
+      }
+    } else if (skipping && /^\s*\[/.test(line)) {
+      skipping = false
+    }
+
+    if (skipping) continue
+    result.push(line)
+  }
+
+  return result.join('\n').replace(/^\s*[\r\n]+/, '').replace(/\s+$/, '')
 }
 
 function authPath(): string {
@@ -201,7 +240,6 @@ async function writeLive(provider: Provider): Promise<ApplyResult> {
 }
 
 async function launch(): Promise<{
-  injected: boolean
   message: string
 }> {
   const provider = listProviders('codex').find((item) => item.enabled)
@@ -210,20 +248,41 @@ async function launch(): Promise<{
   // Refresh proxy port + auth before every launch.
   await writeLive(provider)
 
-  const enhancements = getSettings().codexEnhancements
-  const result = await launchCodex(provider, enhancements)
-  if (enhancements && !result.injected) {
-    return {
-      injected: false,
-      message:
-        'Codex 已启动，但界面增强未注入。请完全退出 Codex/ChatGPT 后重试「打开应用」。'
-    }
-  }
+  await launchCodex(provider)
+  return { message: 'Codex 已启动' }
+}
+
+async function writeMcp(
+  merge: Record<string, McpServerEntry>,
+  removeKeys: string[] = []
+): Promise<ApplyResult> {
+  const file = configPath()
+  fs.mkdirSync(codexDir(), { recursive: true })
+  const backupPath = backupFile('codex', file)
+  const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf-8') : ''
+
+  const removed = stripManagedMcpSections(existing, [
+    ...Object.keys(merge),
+    ...removeKeys
+  ])
+
+  const sections = Object.entries(merge).map(([key, server]) => {
+    return managedTomlSection(key, server)
+  })
+  const next =
+    [removed, ...sections].filter((part) => part.trim()).join('\n\n') + '\n'
+
+  atomicWriteText(file, next)
+  const removedNames = removeKeys.filter((key) => !(key in merge))
   return {
-    injected: result.injected,
-    message: result.injected
-      ? 'Codex 已启动，并已注入界面增强'
-      : 'Codex 已启动'
+    ok: true,
+    message:
+      removedNames.length > 0
+        ? `已从 Codex config.toml 移除 ${removedNames.join(', ')}`
+        : `已合并 MCP 配置到 Codex config.toml（${
+            Object.keys(merge).join(', ') || '无'
+          }）`,
+    backupPath
   }
 }
 
@@ -234,5 +293,6 @@ export const codexAdapter: AppAdapter = {
   detect,
   readLive,
   writeLive,
+  writeMcp,
   launch
 }

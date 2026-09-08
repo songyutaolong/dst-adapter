@@ -81,6 +81,8 @@ export interface McpService {
   baseUrl: string
   modelId: string
   apiKey: string
+  /** 服务启用是应用级配置；running/port 是本机进程级状态。 */
+  enabledApps?: AppId[]
   enabled: boolean
   running: boolean
   port?: number
@@ -115,6 +117,21 @@ export interface SpeedTestResult {
 }
 
 export interface ApplyResult {
+  ok: boolean
+  message: string
+  backupPath?: string
+}
+
+/** GitHub hosts 加速状态 */
+export interface GithubAccelerationStatus {
+  enabled: boolean
+  /** hosts 中是否存在本应用创建的托管配置块 */
+  managed: boolean
+  entryCount: number
+  hostsPath: string
+}
+
+export interface GithubAccelerationResult extends GithubAccelerationStatus {
   ok: boolean
   message: string
   backupPath?: string
@@ -163,14 +180,24 @@ export interface AppSettings {
   launchAtLogin: boolean
   backupKeep: number
   locale: 'zh-CN'
-  codexEnhancements: boolean
+  githubAccelerationEnabled: boolean
+  providerName: string
+  providerEndpoint: string
+  providerApiKey: string
+  providerWireApi: 'responses' | 'chat_completions'
+  providerVendor: string
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
   launchAtLogin: false,
   backupKeep: 10,
   locale: 'zh-CN',
-  codexEnhancements: true
+  githubAccelerationEnabled: false,
+  providerName: 'dst',
+  providerEndpoint: 'https://dst-ai.com',
+  providerApiKey: '',
+  providerWireApi: 'chat_completions',
+  providerVendor: 'dst'
 }
 
 /** 应用自动更新状态（electron-updater 状态机的精简映射） */

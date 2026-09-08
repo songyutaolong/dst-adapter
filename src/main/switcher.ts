@@ -1,6 +1,15 @@
 import type { AppId, ApplyResult, Provider } from '../shared/types'
 import { getAdapter } from './adapters'
-import { getProvider, getModel, markEnabled, enableModel as markModelEnabled, listProviders } from './store'
+import type { McpServerEntry } from './adapters/types'
+import {
+  getProvider,
+  getModel,
+  markEnabled,
+  enableModel as markModelEnabled,
+  listProviders,
+  getMcpConnectionInfo,
+  markMcpServiceEnabled
+} from './store'
 
 export async function enableProvider(providerId: string): Promise<ApplyResult> {
   const provider = getProvider(providerId)
@@ -71,5 +80,35 @@ export async function enableModel(app: AppId, modelId: string): Promise<ApplyRes
   const result = await adapter.writeLive(providerForWrite)
   if (!result.ok) return result
   markModelEnabled(modelId, app)
+  return result
+}
+
+/** 将内置 MCP 配置合并进当前应用，或从应用中移除。 */
+export async function applyMcpToApp(
+  app: AppId,
+  serviceId: string,
+  enabled: boolean
+): Promise<ApplyResult> {
+  const adapter = getAdapter(app)
+  if (!adapter.implemented || !adapter.writeMcp) {
+    return {
+      ok: false,
+      message: `${adapter.name} 尚不支持写入 MCP 配置`
+    }
+  }
+  const detect = await adapter.detect()
+  if (!detect.installed) {
+    return {
+      ok: false,
+      message: `未检测到 ${adapter.name}，请先安装后再启用 MCP`
+    }
+  }
+  const info = getMcpConnectionInfo(serviceId)
+  const entry = info.json as McpServerEntry
+  const result = enabled
+    ? await adapter.writeMcp({ [info.key]: entry }, [])
+    : await adapter.writeMcp({}, [info.key])
+  if (!result.ok) return result
+  markMcpServiceEnabled(serviceId, app, enabled)
   return result
 }
