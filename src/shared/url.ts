@@ -20,6 +20,15 @@ export function toOpenAiRoot(endpoint: string): string {
   return `${trimmed}/v1`
 }
 
+/** 去掉 OpenAI 风格后缀，得到业务 API 根地址（如 /api/... 挂载点）。 */
+export function toApiRoot(endpoint: string): string {
+  return endpoint
+    .trim()
+    .replace(/\/+$/, '')
+    .replace(/\/chat\/completions$/i, '')
+    .replace(/\/v1$/i, '')
+}
+
 export function ensureSkPrefix(apiKey: string): string {
   const key = apiKey.trim()
   if (!key) return key

@@ -70,7 +70,13 @@ export interface AppModelConfig {
   lastSyncAt?: string
 }
 
-export type McpServiceType = 'image-generation' | 'video-generation' | 'text-generation' | 'custom'
+export type McpServiceType =
+  | 'image-generation'
+  | 'video-generation'
+  | 'file-upload'
+  | '3d-generation'
+  | 'text-generation'
+  | 'custom'
 export type McpProvider = 'gemini-3-pro-image' | 'gpt-image-2' | 'doubao-seedance-2.0' | 'dst' | 'custom'
 
 export interface McpService {
@@ -174,6 +180,28 @@ export const BUILTIN_MCP_VIDEO_DEFAULTS = {
   ratios: ['21:9', '16:9', '4:3', '1:1', '3:4', '9:16', 'adaptive'],
   fps: [24, 60],
   durations: [5, 10]
+}
+
+/** 内置文件上传 MCP 服务（不可删除）。 */
+export const BUILTIN_MCP_FILE_UPLOAD_ID = 'builtin-mcp-file-upload'
+export const BUILTIN_MCP_FILE_UPLOAD_PORT = 17891
+
+export const BUILTIN_MCP_FILE_UPLOAD_DEFAULTS = {
+  name: '文件上传工具',
+  type: 'file-upload' as McpServiceType,
+  provider: 'dst' as McpProvider,
+  baseUrl: 'https://dst-ai.com'
+}
+
+/** 内置 3D 生成 MCP 服务（不可删除）。 */
+export const BUILTIN_MCP_3D_ID = 'builtin-mcp-3d-generation'
+export const BUILTIN_MCP_3D_PORT = 17892
+
+export const BUILTIN_MCP_3D_DEFAULTS = {
+  name: '3D 生成工具',
+  type: '3d-generation' as McpServiceType,
+  provider: 'dst' as McpProvider,
+  baseUrl: 'https://dst-ai.com'
 }
 
 export interface AppSettings {

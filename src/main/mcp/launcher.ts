@@ -5,6 +5,10 @@ import {
   BUILTIN_MCP_IMAGE_PORT,
   BUILTIN_MCP_VIDEO_ID,
   BUILTIN_MCP_VIDEO_PORT,
+  BUILTIN_MCP_FILE_UPLOAD_ID,
+  BUILTIN_MCP_FILE_UPLOAD_PORT,
+  BUILTIN_MCP_3D_ID,
+  BUILTIN_MCP_3D_PORT,
   MCP_DEFAULT_PORT
 } from '../../shared/types'
 import { startMcpServer } from './server'
@@ -22,6 +26,8 @@ export interface McpLaunchResult {
 export function getPortForService(serviceId: string): number {
   if (serviceId === BUILTIN_MCP_IMAGE_ID) return BUILTIN_MCP_IMAGE_PORT
   if (serviceId === BUILTIN_MCP_VIDEO_ID) return BUILTIN_MCP_VIDEO_PORT
+  if (serviceId === BUILTIN_MCP_FILE_UPLOAD_ID) return BUILTIN_MCP_FILE_UPLOAD_PORT
+  if (serviceId === BUILTIN_MCP_3D_ID) return BUILTIN_MCP_3D_PORT
   return MCP_DEFAULT_PORT
 }
 

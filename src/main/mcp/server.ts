@@ -1,6 +1,10 @@
 import http from 'http'
+import { createHash, createHmac, randomUUID } from 'crypto'
+import { readFile, stat } from 'fs/promises'
+import path from 'path'
 import type { AddressInfo } from 'net'
 import type { McpService } from '../../shared/types'
+import { toApiRoot } from '../../shared/url'
 import {
   BUILTIN_MCP_IMAGE_DEFAULTS,
   BUILTIN_MCP_VIDEO_DEFAULTS,
@@ -19,6 +23,9 @@ import {
  *   - video_generation 文生视频（提交任务，返回 task_id；支持 doubao-seedance-2.0）
  *   - video_from_image 图生视频（提交任务，返回 task_id）
  *   - video_task_query 查询视频生成任务状态（单次查询，不轮询；轮询节奏由调用方控制）
+ *   - file_upload      文件上传（返回临时公网访问 URL；支持腾讯 COS / 阿里 OSS）
+ *   - text_to_model_3d / image_to_model_3d / multiview_to_model_3d
+ *   - generation_3d_task_query 查询 3D 生成任务状态
  */
 
 export const MCP_PROTOCOL_VERSION = '2025-06-18'
@@ -44,6 +51,85 @@ interface JsonRpcResponse {
   id: string | number | null
   result?: unknown
   error?: JsonRpcError
+}
+
+type CloudStorageProvider = 'cos' | 'oss'
+
+interface CloudStorageConfig {
+  organization_id: number
+  provider: CloudStorageProvider
+  bucket: string
+  region?: string
+  endpoint: string
+  path_prefix?: string
+  custom_domain?: string
+  credentials: {
+    secret_id?: string
+    secret_key?: string
+    access_key_id?: string
+    access_key_secret?: string
+  }
+}
+
+interface SignedCosUrlInput {
+  method: 'GET' | 'PUT'
+  host: string
+  key: string
+  secretId: string
+  secretKey: string
+  expires: number
+  headers?: Record<string, string>
+  params?: Record<string, string>
+}
+
+interface SignedOssUrlInput {
+  method: 'GET' | 'PUT'
+  baseUrl: string
+  bucket: string
+  key: string
+  accessKeyId: string
+  accessKeySecret: string
+  expires: number
+  contentType?: string
+}
+
+interface OssTarget {
+  protocol: string
+  uploadHost: string
+  publicHost: string
+}
+
+const MAX_FILE_UPLOAD_SIZE = 200 * 1024 * 1024
+const MIN_PRESIGNED_EXPIRES = 60
+const MAX_PRESIGNED_EXPIRES = 7 * 24 * 60 * 60
+
+/** 三个 3D 提交工具共用的高级参数说明；真正提交时仍使用三个独立 endpoint。 */
+const THREE_D_METADATA_SCHEMA = {
+  type: 'object',
+  description:
+    'Tripo 高级参数，可选：negative_prompt、enable_image_autofix、texture_alignment、orientation、model_seed、image_seed、face_limit、texture、pbr、texture_seed、texture_quality、geometry_quality、auto_size、quad、smart_low_poly、generate_parts、compress、export_orientation、export_uv',
+  properties: {
+    negative_prompt: { type: 'string' },
+    enable_image_autofix: { type: 'boolean' },
+    texture_alignment: { type: 'string', enum: ['original_image', 'geometry'] },
+    orientation: { type: 'string', enum: ['default', 'align_image'] },
+    model_seed: { type: 'integer' },
+    image_seed: { type: 'integer' },
+    face_limit: { type: 'integer', minimum: -1 },
+    texture: { type: 'boolean' },
+    pbr: { type: 'boolean' },
+    texture_seed: { type: 'integer' },
+    texture_quality: { type: 'string', enum: ['standard', 'detailed', 'extreme'] },
+    geometry_quality: { type: 'string', enum: ['standard', 'detailed'] },
+    auto_size: { type: 'boolean' },
+    quad: { type: 'boolean' },
+    smart_low_poly: { type: 'boolean' },
+    generate_parts: { type: 'boolean' },
+    compress: { type: 'string' },
+    export_orientation: { type: 'string' },
+    export_uv: { type: 'boolean' }
+  },
+  additionalProperties: true
 }
 
 export interface McpServerHandle {
@@ -728,6 +814,532 @@ async function generateVideoFromImage(
   }
 }
 
+/** 3D 模型已由平台统一；此参数只作为特殊场景的可选覆盖。 */
+function pick3DModel(service: McpService, params?: Record<string, unknown>): string | undefined {
+  const requested = params && typeof params.model === 'string' ? params.model.trim() : ''
+  return requested || service.modelId.trim() || undefined
+}
+
+function apply3DModel(body: Record<string, unknown>, model: string | undefined): void {
+  if (model) body.model = model
+}
+
+/** 校验并提取 3D 生成的高级参数；这些字段会原样传给 new-api 的 metadata。 */
+function parse3DMetadata(value: unknown): Record<string, unknown> {
+  if (value === undefined || value === null) return {}
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw { code: -32602, message: '参数 metadata 必须是对象' } as JsonRpcError
+  }
+  return value as Record<string, unknown>
+}
+
+function assert3DResponseSuccess(result: any, action: string): void {
+  const succeeded = result?.code === 'success' || result?.code === 0
+  if (!succeeded) {
+    const reason = result?.message || result?.error_message || `${action} 失败`
+    throw { code: -32603, message: reason } as JsonRpcError
+  }
+}
+
+/** 文生 3D：独立调用 POST /v1/3d/generations/text-to-model */
+async function generateTextToModel3D(
+  service: McpService,
+  params?: Record<string, unknown>
+): Promise<unknown> {
+  if (!service.apiKey.trim()) {
+    throw { code: -32603, message: '未配置 API Key，请在设置中填写后再请求' } as JsonRpcError
+  }
+  const prompt = typeof params?.prompt === 'string' ? params.prompt.trim() : ''
+  if (!prompt) {
+    throw { code: -32602, message: '缺少参数 prompt（3D 模型描述）' } as JsonRpcError
+  }
+
+  const body: Record<string, unknown> = {
+    prompt,
+    metadata: parse3DMetadata(params?.metadata)
+  }
+  apply3DModel(body, pick3DModel(service, params))
+  const endpoint = `${toApiRoot(service.baseUrl)}/v1/3d/generations/text-to-model`
+  const resp = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${service.apiKey.trim()}`
+    },
+    body: JSON.stringify(body)
+  })
+  const text = await resp.text()
+  if (!resp.ok) {
+    throw { code: resp.status, message: `文生 3D 提交失败 ${resp.status}: ${text.slice(0, 500)}` } as JsonRpcError
+  }
+
+  const result = text ? (jsonOrThrow(text) as any) : null
+  assert3DResponseSuccess(result, '文生 3D')
+  const taskId = result?.data?.task_id
+  if (!taskId) {
+    throw { code: -32603, message: '文生 3D 返回缺少 task_id' } as JsonRpcError
+  }
+  return {
+    tool: 'text_to_model_3d',
+    task_id: taskId,
+    status: result.data?.status || 'submitted',
+    progress: result.data?.progress || '10%'
+  }
+}
+
+/** 图生 3D：独立调用 POST /v1/3d/generations/image-to-model，图片字段是 input */
+async function generateImageToModel3D(
+  service: McpService,
+  params?: Record<string, unknown>
+): Promise<unknown> {
+  if (!service.apiKey.trim()) {
+    throw { code: -32603, message: '未配置 API Key，请在设置中填写后再请求' } as JsonRpcError
+  }
+  const input = typeof params?.input === 'string' ? params.input.trim() : ''
+  if (!input) {
+    throw { code: -32602, message: '缺少参数 input（单张图片 URL）' } as JsonRpcError
+  }
+
+  const body: Record<string, unknown> = {
+    input,
+    metadata: parse3DMetadata(params?.metadata)
+  }
+  apply3DModel(body, pick3DModel(service, params))
+  const endpoint = `${toApiRoot(service.baseUrl)}/v1/3d/generations/image-to-model`
+  const resp = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${service.apiKey.trim()}`
+    },
+    body: JSON.stringify(body)
+  })
+  const text = await resp.text()
+  if (!resp.ok) {
+    throw { code: resp.status, message: `图生 3D 提交失败 ${resp.status}: ${text.slice(0, 500)}` } as JsonRpcError
+  }
+
+  const result = text ? (jsonOrThrow(text) as any) : null
+  assert3DResponseSuccess(result, '图生 3D')
+  const taskId = result?.data?.task_id
+  if (!taskId) {
+    throw { code: -32603, message: '图生 3D 返回缺少 task_id' } as JsonRpcError
+  }
+  return {
+    tool: 'image_to_model_3d',
+    task_id: taskId,
+    status: result.data?.status || 'submitted',
+    progress: result.data?.progress || '10%'
+  }
+}
+
+/** 多视图生 3D：独立调用 POST /v1/3d/generations/multiview-to-model，图片字段是 inputs */
+async function generateMultiviewToModel3D(
+  service: McpService,
+  params?: Record<string, unknown>
+): Promise<unknown> {
+  if (!service.apiKey.trim()) {
+    throw { code: -32603, message: '未配置 API Key，请在设置中填写后再请求' } as JsonRpcError
+  }
+  const inputs = params?.inputs
+  if (!Array.isArray(inputs) || inputs.length === 0) {
+    throw { code: -32602, message: '缺少参数 inputs（多视图图片数组）' } as JsonRpcError
+  }
+  for (const item of inputs) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      throw { code: -32602, message: 'inputs 的每一项必须是对象，例如 {"front":"https://..."}' } as JsonRpcError
+    }
+  }
+
+  const body: Record<string, unknown> = {
+    inputs,
+    metadata: parse3DMetadata(params?.metadata)
+  }
+  apply3DModel(body, pick3DModel(service, params))
+  const endpoint = `${toApiRoot(service.baseUrl)}/v1/3d/generations/multiview-to-model`
+  const resp = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${service.apiKey.trim()}`
+    },
+    body: JSON.stringify(body)
+  })
+  const text = await resp.text()
+  if (!resp.ok) {
+    throw { code: resp.status, message: `多视图 3D 提交失败 ${resp.status}: ${text.slice(0, 500)}` } as JsonRpcError
+  }
+
+  const result = text ? (jsonOrThrow(text) as any) : null
+  assert3DResponseSuccess(result, '多视图 3D')
+  const taskId = result?.data?.task_id
+  if (!taskId) {
+    throw { code: -32603, message: '多视图 3D 返回缺少 task_id' } as JsonRpcError
+  }
+  return {
+    tool: 'multiview_to_model_3d',
+    task_id: taskId,
+    status: result.data?.status || 'submitted',
+    progress: result.data?.progress || '10%'
+  }
+}
+
+/** 查询 3D 生成任务状态：独立调用 GET /v1/3d/generations/{task_id} */
+async function query3DGenerationTask(service: McpService, taskId: string): Promise<unknown> {
+  const endpoint = `${toApiRoot(service.baseUrl)}/v1/3d/generations/${encodeURIComponent(taskId)}`
+  const resp = await fetch(endpoint, {
+    headers: { authorization: `Bearer ${service.apiKey.trim()}` }
+  })
+  const text = await resp.text()
+  if (!resp.ok) {
+    throw { code: resp.status, message: `查询 3D 任务失败 ${resp.status}: ${text.slice(0, 500)}` } as JsonRpcError
+  }
+
+  const result = text ? (jsonOrThrow(text) as any) : null
+  assert3DResponseSuccess(result, '查询 3D 任务')
+  const data = result?.data
+  if (!data || typeof data !== 'object') {
+    throw { code: -32603, message: '查询 3D 任务返回为空' } as JsonRpcError
+  }
+
+  return {
+    task_id: data.task_id || taskId,
+    status: data.status,
+    progress: data.progress,
+    result_url: data.result_url,
+    fail_reason: data.fail_reason,
+    data
+  }
+}
+
+/** 通过 Provider Key 读取所属组织的云存储配置（凭据只在内存中短暂使用）。 */
+async function getCloudStorageConfig(
+  service: McpService,
+  provider?: CloudStorageProvider
+): Promise<CloudStorageConfig> {
+  if (!service.apiKey.trim()) {
+    throw { code: -32603, message: '未配置 API Key，请在设置中填写后再请求' } as JsonRpcError
+  }
+
+  const query = provider ? `provider=${provider}` : ''
+  const endpoint = `${toApiRoot(service.baseUrl)}/api/cloud-storage/config${query ? `?${query}` : ''}`
+  const resp = await fetch(endpoint, {
+    headers: { authorization: `Bearer ${service.apiKey.trim()}` }
+  })
+  const text = await resp.text()
+  if (!resp.ok) {
+    throw { code: resp.status, message: `获取云存储配置失败 ${resp.status}: ${text.slice(0, 500)}` } as JsonRpcError
+  }
+
+  let body: { success?: boolean; data?: CloudStorageConfig; message?: string }
+  try {
+    body = text ? (jsonOrThrow(text) as typeof body) : {}
+  } catch {
+    throw { code: -32603, message: '云存储配置返回不是有效 JSON' } as JsonRpcError
+  }
+
+  const data = body.data
+  if (!body.success || !data || (data.provider !== 'cos' && data.provider !== 'oss')) {
+    throw { code: -32603, message: body.message || '云存储未配置，或存储类型不是 COS/OSS' } as JsonRpcError
+  }
+  if (!data.bucket) {
+    throw { code: -32603, message: '云存储配置缺少 bucket' } as JsonRpcError
+  }
+  if (
+    data.provider === 'cos' &&
+    (!data.region || !data.credentials?.secret_id || !data.credentials?.secret_key)
+  ) {
+    throw { code: -32603, message: '腾讯云 COS 配置缺少 region 或凭据' } as JsonRpcError
+  }
+  if (
+    data.provider === 'oss' &&
+    (!data.endpoint || !data.credentials?.access_key_id || !data.credentials?.access_key_secret)
+  ) {
+    throw { code: -32603, message: '阿里云 OSS 配置缺少 endpoint 或凭据' } as JsonRpcError
+  }
+  return data
+}
+
+function canonicalList(values: Record<string, string>, formatter: (key: string, value: string) => string): string {
+  return Object.entries(values)
+    .map(([key, value]) => formatter(encodeURIComponent(key).toLowerCase(), encodeURIComponent(value)))
+    .sort()
+    .join('&')
+}
+
+/** 生成腾讯云 COS 预签名 URL；只签名业务参数与显式请求头。 */
+function buildSignedCosUrl(input: SignedCosUrlInput): string {
+  const requestPath = input.key
+    .split('/')
+    .map((part) => encodeURIComponent(part))
+    .join('/')
+  const requestPathname = `/${requestPath}`
+  const signaturePathname = `/${input.key}`
+  const now = Math.floor(Date.now() / 1000)
+  const keyTime = `${now};${now + input.expires}`
+  const signKey = createHmac('sha1', input.secretKey).update(keyTime).digest('hex')
+
+  const params = Object.fromEntries(
+    Object.entries(input.params || {}).map(([key, value]) => [key.toLowerCase(), value])
+  )
+  const headers = Object.fromEntries(
+    Object.entries(input.headers || {}).map(([key, value]) => [key.toLowerCase(), value])
+  )
+  const paramsString = canonicalList(params, (key, value) => `${key}=${value}`)
+  const headersString = canonicalList(headers, (key, value) => `${key}=${value.replace(/\s+/g, ' ').trim()}`)
+  const httpString = `${input.method.toLowerCase()}\n${signaturePathname}\n${paramsString}\n${headersString}\n`
+  const stringToSign = `sha1\n${keyTime}\n${createHash('sha1').update(httpString).digest('hex')}\n`
+  const signature = createHmac('sha1', signKey).update(stringToSign).digest('hex')
+
+  const query = new URLSearchParams({
+    'q-sign-algorithm': 'sha1',
+    'q-ak': input.secretId,
+    'q-sign-time': keyTime,
+    'q-key-time': keyTime,
+    'q-header-list': Object.keys(headers).sort().join(';'),
+    'q-url-param-list': Object.keys(params).sort().join(';'),
+    'q-signature': signature
+  })
+  return `https://${input.host}${requestPathname}?${query.toString()}`
+}
+
+/** COS API 必须走虚拟主机域名；自定义域名只用于公开访问 URL。 */
+function cosApiHost(config: CloudStorageConfig): string {
+  return `${config.bucket}.cos.${config.region}.myqcloud.com`
+}
+
+function cosPublicHost(config: CloudStorageConfig): string {
+  const custom = config.custom_domain?.trim().replace(/\/+$/, '')
+  if (custom) return custom.replace(/^https?:\/\//i, '')
+  return cosApiHost(config)
+}
+
+/** 生成 OSS V1 预签名 URL；上传时显式签名 Content-Type。 */
+function buildSignedOssUrl(input: SignedOssUrlInput): string {
+  const pathname = input.key
+    .split('/')
+    .map((part) => encodeURIComponent(part))
+    .join('/')
+  const expires = Math.floor(Date.now() / 1000) + input.expires
+  const contentType = input.contentType || ''
+  const stringToSign = [
+    input.method,
+    '',
+    contentType,
+    String(expires),
+    `/${input.bucket}/${input.key}`
+  ].join('\n')
+  const signature = createHmac('sha1', input.accessKeySecret)
+    .update(stringToSign)
+    .digest('base64')
+
+  const query = new URLSearchParams({
+    OSSAccessKeyId: input.accessKeyId,
+    Expires: String(expires),
+    Signature: signature
+  })
+  return `${input.baseUrl}/${pathname}?${query.toString()}`
+}
+
+/** OSS 走虚拟主机域名；管理端可能存区域 Endpoint 或已带 bucket 的完整 Endpoint。 */
+function resolveOssTarget(config: CloudStorageConfig): OssTarget {
+  const rawEndpoint = config.endpoint.trim()
+  const endpointUrl = new URL(/^https?:\/\//i.test(rawEndpoint) ? rawEndpoint : `https://${rawEndpoint}`)
+  const endpointHost = endpointUrl.host
+  const uploadHost = endpointHost.startsWith(`${config.bucket}.`)
+    ? endpointHost
+    : `${config.bucket}.${endpointHost}`
+  const custom = config.custom_domain?.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '')
+
+  return {
+    protocol: endpointUrl.protocol.replace(':', ''),
+    uploadHost,
+    publicHost: custom || uploadHost
+  }
+}
+
+function sanitizeFileName(name: string): string {
+  const base = name.split(/[\\/]/).pop() || ''
+  return base
+    .replace(/[\\/:*?"<>|\r\n\t]+/g, '_')
+    .replace(/^\.+/, '')
+    .trim()
+    .slice(0, 120)
+}
+
+function guessContentType(filename: string): string {
+  const ext = path.extname(filename).toLowerCase()
+  const types: Record<string, string> = {
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+    '.svg': 'image/svg+xml',
+    '.pdf': 'application/pdf',
+    '.txt': 'text/plain',
+    '.md': 'text/markdown',
+    '.csv': 'text/csv',
+    '.json': 'application/json',
+    '.mp3': 'audio/mpeg',
+    '.wav': 'audio/wav',
+    '.mp4': 'video/mp4',
+    '.webm': 'video/webm',
+    '.zip': 'application/zip'
+  }
+  return types[ext] || 'application/octet-stream'
+}
+
+function parsePresignedExpires(value: unknown): number {
+  const requested = typeof value === 'number' ? value : Number(value)
+  const expires = Number.isFinite(requested) ? Math.floor(requested) : 3600
+  return Math.min(Math.max(expires, MIN_PRESIGNED_EXPIRES), MAX_PRESIGNED_EXPIRES)
+}
+
+function decodeUploadContent(
+  content: string,
+  filename: string
+): { buffer: Buffer; filename: string; contentType: string } {
+  const trimmed = content.trim()
+  const dataUri = /^data:([^;,]+);base64,(.+)$/s.exec(trimmed)
+  const base64 = dataUri ? dataUri[2] : trimmed
+  const buffer = Buffer.from(base64, 'base64')
+  if (buffer.length === 0) {
+    throw { code: -32602, message: '参数 content 不是有效的 Base64 文件数据' } as JsonRpcError
+  }
+  const inferredName = dataUri ? `file.${dataUri[1].split('/')[1] || 'bin'}` : 'file.bin'
+  const finalName = sanitizeFileName(filename || inferredName) || inferredName
+  return { buffer, filename: finalName, contentType: guessContentType(finalName) }
+}
+
+async function readUploadFile(file: string): Promise<Buffer> {
+  const stats = await stat(file)
+  if (!stats.isFile()) {
+    throw { code: -32602, message: 'file_path 不是普通文件' } as JsonRpcError
+  }
+  if (stats.size > MAX_FILE_UPLOAD_SIZE) {
+    throw { code: -32602, message: `文件过大（上限 ${Math.floor(MAX_FILE_UPLOAD_SIZE / 1024 / 1024)}MB）` } as JsonRpcError
+  }
+  const buffer = await readFile(file)
+  if (buffer.length === 0) {
+    throw { code: -32602, message: '文件内容为空，无法上传' } as JsonRpcError
+  }
+  if (buffer.byteLength > MAX_FILE_UPLOAD_SIZE) {
+    throw { code: -32602, message: `文件过大（上限 ${Math.floor(MAX_FILE_UPLOAD_SIZE / 1024 / 1024)}MB）` } as JsonRpcError
+  }
+  return buffer
+}
+
+/** 上传文件到组织绑定的 COS/OSS，并返回带过期时间的公网访问 URL。 */
+async function uploadFileToCloudStorage(
+  service: McpService,
+  params?: Record<string, unknown>
+): Promise<unknown> {
+  const rawProvider = typeof params?.provider === 'string' ? params.provider.trim().toLowerCase() : ''
+  if (rawProvider && rawProvider !== 'cos' && rawProvider !== 'oss') {
+    throw { code: -32602, message: 'provider 仅支持 cos 或 oss' } as JsonRpcError
+  }
+  const config = await getCloudStorageConfig(service, (rawProvider || undefined) as CloudStorageProvider | undefined)
+  const filePath = typeof params?.file_path === 'string' ? params.file_path.trim() : ''
+  const content = typeof params?.content === 'string' ? params.content.trim() : ''
+  if (Boolean(filePath) === Boolean(content)) {
+    throw { code: -32602, message: 'file_path 和 content 必须二选一' } as JsonRpcError
+  }
+
+  const inputName = typeof params?.file_name === 'string' ? params.file_name : ''
+  let buffer: Buffer
+  let filename: string
+  if (filePath) {
+    buffer = await readUploadFile(filePath)
+    filename = sanitizeFileName(path.basename(filePath) || inputName || 'file.bin') || 'file.bin'
+  } else {
+    const decoded = decodeUploadContent(content, inputName)
+    buffer = decoded.buffer
+    filename = decoded.filename
+  }
+  if (buffer.byteLength > MAX_FILE_UPLOAD_SIZE) {
+    throw { code: -32602, message: `文件过大（上限 ${Math.floor(MAX_FILE_UPLOAD_SIZE / 1024 / 1024)}MB）` } as JsonRpcError
+  }
+
+  const expires = parsePresignedExpires(params?.expires_in)
+  const datePath = new Date().toISOString().slice(0, 10).replace(/-/g, '')
+  const normalizedPrefix = config.path_prefix?.replace(/^\/+|\/+$/g, '') || ''
+  const key = [normalizedPrefix, 'mcp-uploads', datePath, `${randomUUID()}_${filename}`]
+    .filter(Boolean)
+    .join('/')
+  const contentType = guessContentType(filename)
+
+  let uploadUrl: string
+  let publicUrl: string
+  if (config.provider === 'oss') {
+    const target = resolveOssTarget(config)
+    const accessKeyId = config.credentials.access_key_id || ''
+    const accessKeySecret = config.credentials.access_key_secret || ''
+    uploadUrl = buildSignedOssUrl({
+      method: 'PUT',
+      baseUrl: `${target.protocol}://${target.uploadHost}`,
+      bucket: config.bucket,
+      key,
+      accessKeyId,
+      accessKeySecret,
+      expires: 600,
+      contentType
+    })
+    publicUrl = buildSignedOssUrl({
+      method: 'GET',
+      baseUrl: `${target.protocol}://${target.publicHost}`,
+      bucket: config.bucket,
+      key,
+      accessKeyId,
+      accessKeySecret,
+      expires
+    })
+  } else {
+    uploadUrl = buildSignedCosUrl({
+      method: 'PUT',
+      host: cosApiHost(config),
+      key,
+      secretId: config.credentials.secret_id || '',
+      secretKey: config.credentials.secret_key || '',
+      expires: 600,
+      headers: { 'content-type': contentType }
+    })
+    publicUrl = buildSignedCosUrl({
+      method: 'GET',
+      host: cosPublicHost(config),
+      key,
+      secretId: config.credentials.secret_id || '',
+      secretKey: config.credentials.secret_key || '',
+      expires
+    })
+  }
+
+  const uploadResp = await fetch(uploadUrl, {
+    method: 'PUT',
+    headers: { 'content-type': contentType },
+    body: new Uint8Array(buffer)
+  })
+  if (!uploadResp.ok) {
+    const errorText = await uploadResp.text()
+    throw {
+      code: uploadResp.status,
+      message: `${config.provider.toUpperCase()} 上传失败 ${uploadResp.status}: ${errorText.slice(0, 800)}`
+    } as JsonRpcError
+  }
+
+  return {
+    url: publicUrl,
+    key,
+    bucket: config.bucket,
+    provider: config.provider,
+    filename,
+    size: buffer.byteLength,
+    content_type: contentType,
+    expires_in: expires,
+    expires_at: new Date(Date.now() + expires * 1000).toISOString()
+  }
+}
+
 /** tools/list 声明。 */
 function listTools(serviceType: string): unknown[] {
   if (serviceType === 'image-generation') {
@@ -936,6 +1548,114 @@ function listTools(serviceType: string): unknown[] {
         }
       }
     ]
+  } else if (serviceType === 'file-upload') {
+    return [
+      {
+        name: 'file_upload',
+        description: '上传本地文件或 Base64 内容到腾讯云 COS 或阿里云 OSS，返回带过期时间的临时公网访问 URL',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            file_path: {
+              type: 'string',
+              description: '本地文件绝对路径；与 content 二选一'
+            },
+            content: {
+              type: 'string',
+              description: '文件内容（Base64，支持 data:image/png;base64,... 前缀）；与 file_path 二选一'
+            },
+            file_name: {
+              type: 'string',
+              description: 'content 模式下的文件名，用于识别扩展名'
+            },
+            provider: {
+              type: 'string',
+              enum: ['cos', 'oss'],
+              description: '云存储类型：cos（腾讯云）或 oss（阿里云）；缺省使用组织当前启用的存储'
+            },
+            expires_in: {
+              type: 'integer',
+              description: 'URL 有效期（秒），默认 3600，范围 60 到 604800'
+            }
+          }
+        }
+      }
+    ]
+  } else if (serviceType === '3d-generation') {
+    return [
+      {
+        name: 'text_to_model_3d',
+        description: '文生 3D：根据文字描述生成 3D 模型任务，独立调用 text-to-model 接口',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            prompt: { type: 'string', description: '3D 模型描述（必填）' },
+            model: {
+              type: 'string',
+              description: '可选模型 ID；不传时使用平台统一模型'
+            },
+            metadata: THREE_D_METADATA_SCHEMA
+          },
+          required: ['prompt']
+        }
+      },
+      {
+        name: 'image_to_model_3d',
+        description: '图生 3D：根据单张图片生成 3D 模型任务，独立调用 image-to-model 接口',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            input: { type: 'string', description: '单张输入图片 URL（必填）' },
+            model: {
+              type: 'string',
+              description: '可选模型 ID；不传时使用平台统一模型'
+            },
+            metadata: THREE_D_METADATA_SCHEMA
+          },
+          required: ['input']
+        }
+      },
+      {
+        name: 'multiview_to_model_3d',
+        description: '多视图生 3D：根据多视角图片生成 3D 模型任务，独立调用 multiview-to-model 接口',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            inputs: {
+              type: 'array',
+              items: {
+                type: 'object',
+                description:
+                  '视角图片对象，键可为 front、back、left、right、top、bottom 等官方视角；例如 {"front":"https://...","left":"https://..."}',
+                additionalProperties: { type: 'string' }
+              },
+              minItems: 1,
+              description: '多视角图片数组（必填）'
+            },
+            model: {
+              type: 'string',
+              description: '可选模型 ID；不传时使用平台统一模型'
+            },
+            metadata: THREE_D_METADATA_SCHEMA
+          },
+          required: ['inputs']
+        }
+      },
+      {
+        name: 'generation_3d_task_query',
+        description: '查询 3D 生成任务状态和结果 URL（单次查询，不轮询）',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            task_id: {
+              type: 'string',
+              description: '任务 ID（三个 3D 提交工具返回）'
+            }
+          },
+          required: ['task_id']
+        }
+      }
+    ]
   }
   return []
 }
@@ -963,7 +1683,14 @@ async function dispatch(
           protocolVersion: negotiated,
           capabilities: { tools: { listChanged: false } },
           serverInfo: {
-            name: service.type === 'video-generation' ? 'dst-video-mcp' : 'dst-image-mcp',
+            name:
+              service.type === 'video-generation'
+                ? 'dst-video-mcp'
+                : service.type === 'file-upload'
+                  ? 'dst-file-mcp'
+                  : service.type === '3d-generation'
+                    ? 'dst-3d-mcp'
+                    : 'dst-image-mcp',
             version: '0.1.0'
           }
         }
@@ -1001,6 +1728,28 @@ async function dispatch(
               throw { code: -32602, message: '缺少参数 task_id' } as JsonRpcError
             }
             output = await queryVideoTask(service, taskId)
+          } else {
+            throw { code: -32602, message: `未知工具: ${toolName}` } as JsonRpcError
+          }
+        } else if (service.type === 'file-upload') {
+          if (toolName === 'file_upload') {
+            output = await uploadFileToCloudStorage(service, args)
+          } else {
+            throw { code: -32602, message: `未知工具: ${toolName}` } as JsonRpcError
+          }
+        } else if (service.type === '3d-generation') {
+          if (toolName === 'text_to_model_3d') {
+            output = await generateTextToModel3D(service, args)
+          } else if (toolName === 'image_to_model_3d') {
+            output = await generateImageToModel3D(service, args)
+          } else if (toolName === 'multiview_to_model_3d') {
+            output = await generateMultiviewToModel3D(service, args)
+          } else if (toolName === 'generation_3d_task_query') {
+            const taskId = typeof args.task_id === 'string' ? args.task_id.trim() : ''
+            if (!taskId) {
+              throw { code: -32602, message: '缺少参数 task_id' } as JsonRpcError
+            }
+            output = await query3DGenerationTask(service, taskId)
           } else {
             throw { code: -32602, message: `未知工具: ${toolName}` } as JsonRpcError
           }

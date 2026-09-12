@@ -12,7 +12,10 @@ import type {
   UpdateState,
   GithubAccelerationResult
 } from '../../shared/types'
-import { BUILTIN_MCP_IMAGE_DEFAULTS, BUILTIN_MCP_VIDEO_DEFAULTS } from '../../shared/types'
+import {
+  BUILTIN_MCP_IMAGE_DEFAULTS,
+  BUILTIN_MCP_VIDEO_DEFAULTS
+} from '../../shared/types'
 
 type TabId = 'provide' | 'mcp' | 'skill'
 
@@ -1100,11 +1103,23 @@ export default function App() {
                                     : '自定义'}
                           </div>
                           <div className="sub">
-                            支持模型：
+                            {s.type === 'file-upload'
+                              ? '支持输入：'
+                              : s.type === '3d-generation'
+                                ? '支持任务：'
+                                : '支持模型：'}
                             {s.type === 'video-generation'
                               ? BUILTIN_MCP_VIDEO_DEFAULTS.models.join(' / ')
-                              : BUILTIN_MCP_IMAGE_DEFAULTS.models.join(' / ')}
-                            （请求时按参数选择）
+                              : s.type === 'file-upload'
+                                ? '腾讯 COS / 阿里 OSS；本地路径 / Base64 文件'
+                                : s.type === '3d-generation'
+                                  ? '文生 / 图生 / 多视图 / 任务查询'
+                                  : BUILTIN_MCP_IMAGE_DEFAULTS.models.join(' / ')}
+                            {s.type === 'file-upload'
+                              ? '（file_path / content 二选一）'
+                              : s.type === '3d-generation'
+                                ? '（统一模型）'
+                                : '（请求时按参数选择）'}
                           </div>
                           <div className="row mcp-actions">
                             <button

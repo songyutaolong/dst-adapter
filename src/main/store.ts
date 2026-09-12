@@ -9,7 +9,11 @@ import {
   BUILTIN_MCP_IMAGE_ID,
   BUILTIN_MCP_IMAGE_DEFAULTS,
   BUILTIN_MCP_VIDEO_ID,
-  BUILTIN_MCP_VIDEO_DEFAULTS
+  BUILTIN_MCP_VIDEO_DEFAULTS,
+  BUILTIN_MCP_FILE_UPLOAD_ID,
+  BUILTIN_MCP_FILE_UPLOAD_DEFAULTS,
+  BUILTIN_MCP_3D_ID,
+  BUILTIN_MCP_3D_DEFAULTS
 } from '../shared/types'
 import { getMcpRuntime, getPortForService } from './mcp/launcher'
 
@@ -402,6 +406,46 @@ function builtinMcpVideoService(): McpService {
   }
 }
 
+/** 内置文件上传服务模板；如不存在则创建（不可删除、不可重复添加）。 */
+function builtinMcpFileUploadService(): McpService {
+  const now = new Date().toISOString()
+  return {
+    id: BUILTIN_MCP_FILE_UPLOAD_ID,
+    name: BUILTIN_MCP_FILE_UPLOAD_DEFAULTS.name,
+    type: BUILTIN_MCP_FILE_UPLOAD_DEFAULTS.type,
+    provider: BUILTIN_MCP_FILE_UPLOAD_DEFAULTS.provider,
+    baseUrl: BUILTIN_MCP_FILE_UPLOAD_DEFAULTS.baseUrl,
+    modelId: '',
+    apiKey: '',
+    enabledApps: [],
+    enabled: false,
+    running: false,
+    builtin: true,
+    createdAt: now,
+    updatedAt: now
+  }
+}
+
+/** 内置 3D 生成服务模板；如不存在则创建（不可删除、不可重复添加）。 */
+function builtinMcp3DService(): McpService {
+  const now = new Date().toISOString()
+  return {
+    id: BUILTIN_MCP_3D_ID,
+    name: BUILTIN_MCP_3D_DEFAULTS.name,
+    type: BUILTIN_MCP_3D_DEFAULTS.type,
+    provider: BUILTIN_MCP_3D_DEFAULTS.provider,
+    baseUrl: BUILTIN_MCP_3D_DEFAULTS.baseUrl,
+    modelId: '',
+    apiKey: '',
+    enabledApps: [],
+    enabled: false,
+    running: false,
+    builtin: true,
+    createdAt: now,
+    updatedAt: now
+  }
+}
+
 export function listMcpServices(): McpService[] {
   const store = loadStore()
   let changed = false
@@ -459,6 +503,25 @@ export function listMcpServices(): McpService[] {
     if (changed) {
       builtinVideo.updatedAt = new Date().toISOString()
     }
+  }
+
+  // 确保文件上传服务存在
+  const builtinFileUpload = store.mcpServices.find((s) => s.id === BUILTIN_MCP_FILE_UPLOAD_ID)
+  if (!builtinFileUpload) {
+    store.mcpServices.push(builtinMcpFileUploadService())
+    changed = true
+  }
+
+  // 确保 3D 生成服务存在
+  const builtin3D = store.mcpServices.find((s) => s.id === BUILTIN_MCP_3D_ID)
+  if (!builtin3D) {
+    store.mcpServices.push(builtinMcp3DService())
+    changed = true
+  } else if (builtin3D.modelId) {
+    // 3D 模型已在平台侧归拢，内置服务不再保留本机默认模型。
+    builtin3D.modelId = ''
+    builtin3D.updatedAt = new Date().toISOString()
+    changed = true
   }
 
   if (changed) {
@@ -578,7 +641,10 @@ export function getMcpConnectionInfo(id: string): {
   const localUrl = `http://127.0.0.1:${port}`
   let key: string
   if (service.builtin) {
-    key = service.id === BUILTIN_MCP_IMAGE_ID ? 'dst-image-mcp' : 'dst-video-mcp'
+    if (service.id === BUILTIN_MCP_IMAGE_ID) key = 'dst-image-mcp'
+    else if (service.id === BUILTIN_MCP_VIDEO_ID) key = 'dst-video-mcp'
+    else if (service.id === BUILTIN_MCP_FILE_UPLOAD_ID) key = 'dst-file-mcp'
+    else key = 'dst-3d-mcp'
   } else {
     key = service.id
   }

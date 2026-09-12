@@ -1,6 +1,6 @@
 {
   "name": "dst-adapter",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "大算头适配器 — 通用 AI 服务商管理与本机客户端一键接入",
   "main": "out/main/index.js",
   "author": "大算头",
