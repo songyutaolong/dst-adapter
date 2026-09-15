@@ -4,7 +4,7 @@ import { autoUpdater, type UpdateInfo } from 'electron-updater'
 import type { UpdateState } from '../shared/types'
 
 /**
- * 自动更新模块（electron-updater + GitHub Releases）
+ * 自动更新模块（electron-updater；打包时可选择 OSS generic feed 或 GitHub 兜底）
  *
  * - 开发模式（!app.isPackaged）下不初始化，状态置 unsupported。
  * - 自动更新已关闭：启动不检查、发现新版本不自动下载；

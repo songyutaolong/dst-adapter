@@ -29,6 +29,7 @@ jobs:
         run: npm run dist:win -- --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
+          DST_UPDATE_BASE_URL: ${{ vars.OSS_UPDATE_BASE_URL }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -54,5 +55,22 @@ jobs:
             gh release create "${GITHUB_REF_NAME}" \
               --title "${GITHUB_REF_NAME}" \
               --generate-notes $FILES || \
-              gh release upload --clobber "${GITHUB_REF_NAME}" $FILES
+            gh release upload --clobber "${GITHUB_REF_NAME}" $FILES
           fi
+
+      - name: Publish update artifacts to Aliyun OSS
+        if: startsWith(github.ref, 'refs/tags/') && vars.OSS_UPDATE_ENABLED == 'true'
+        env:
+          DST_UPDATE_BASE_URL: ${{ vars.OSS_UPDATE_BASE_URL }}
+          OSS_ENDPOINT: ${{ vars.OSS_ENDPOINT }}
+          OSS_BUCKET: ${{ vars.OSS_BUCKET }}
+          OSS_UPDATE_PREFIX: ${{ vars.OSS_UPDATE_PREFIX }}
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+        shell: bash
+        run: |
+          node scripts/publish-oss.mjs \
+            --dir release \
+            --include "*.exe" \
+            --include "latest.yml" \
+            --include "*.blockmap"

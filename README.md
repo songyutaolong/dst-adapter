@@ -72,12 +72,50 @@ npm run dist:mac   # macOS（必须在 Mac 上执行）
 
 ## 联网更新（electron-updater）
 
-应用内置自动更新，更新源为 GitHub Releases（`latest.yml` / `latest-mac.yml` 元数据 + 安装包 + blockmap）。
+应用内置自动更新。CI 设置 `DST_UPDATE_BASE_URL` 后，更新源为阿里 OSS 上的静态文件（`latest.yml` / `latest-mac.yml` 元数据 + 安装包 + blockmap）；未设置时沿用 GitHub Releases 兜底，便于本地和旧流程打包。
+
+### OSS 更新源
+
+OSS 前缀示例：
+
+```text
+https://<bucket>.oss-cn-hangzhou.aliyuncs.com/dst-adapter/releases/
+```
+
+该前缀下必须同时保存：
+
+- Windows：`latest.yml`、NSIS `.exe`、`.blockmap`
+- macOS：`latest-mac.yml`、`.dmg`、自动更新用 `.zip`、`.blockmap`
+
+自动更新读取的是普通 HTTPS GET，`latest*.yml` 不应是过期缓存。`scripts/publish-oss.mjs` 已将清单设为 `no-cache`，安装包和 blockmap 设为一年 immutable 缓存。桌面端不需要配置 CORS；更新前缀需允许公网读，或通过可公网访问的 CDN 域名提供。私有桶签名 URL 不适合作为长期更新源。
+
+GitHub Actions 需要配置：
+
+| 类型 | 变量 | 示例 |
+|------|------|------|
+| Repository variable | `OSS_UPDATE_ENABLED` | `true` |
+| Repository variable | `OSS_UPDATE_BASE_URL` | `https://bucket.oss-cn-hangzhou.aliyuncs.com/dst-adapter/releases/` |
+| Repository variable | `OSS_ENDPOINT` | `oss-cn-hangzhou.aliyuncs.com` |
+| Repository variable | `OSS_BUCKET` | `bucket` |
+| Repository variable | `OSS_UPDATE_PREFIX` | `dst-adapter/releases` |
+| Repository secret | `OSS_ACCESS_KEY_ID` | RAM AccessKey ID |
+| Repository secret | `OSS_ACCESS_KEY_SECRET` | RAM AccessKey Secret |
+
+RAM 用户至少需要目标前缀的 `oss:PutObject` 和 `oss:PutObjectAcl` 权限。上传脚本会把更新对象设为 `public-read`；如果 bucket 开启“阻止公开访问”，请改为 CDN 私有回源方案，并让 `DST_UPDATE_BASE_URL` 指向 CDN 公网地址。
+
+本地也可以显式指定 OSS 后打包：
+
+```powershell
+$env:DST_UPDATE_BASE_URL = "https://bucket.oss-cn-hangzhou.aliyuncs.com/dst-adapter/releases/"
+npm run dist:win
+```
+
+已在 GitHub 上的旧客户端仍会读取 GitHub feed。保留 workflow 里“Attach to GitHub Release”这一步，让它们先更新到第一个 OSS 配置版；之后的新客户端会读取包内 `app-update.yml` 的 OSS generic feed。
 
 ### 发布流程（发新版）
 
 1. 本地改版本号 `package.json` → `version`
-2. 打 tag 并推送（`Build macOS` / `Build Windows` 两个 workflow 自动构建并发布到 GitHub Release）：
+2. 打 tag 并推送（`Build macOS` / `Build Windows` 两个 workflow 自动构建；启用 OSS 后会同时上传 OSS 和 GitHub Release）：
    ```bash
    git tag v0.2.0
    git push origin v0.2.0

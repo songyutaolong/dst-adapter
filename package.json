@@ -1,25 +1,17 @@
 {
   "name": "dst-adapter",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "大算头适配器 — 通用 AI 服务商管理与本机客户端一键接入",
   "main": "out/main/index.js",
   "author": "大算头",
   "license": "MIT",
-  "publish": [
-    {
-      "provider": "github",
-      "owner": "songyutaolong",
-      "repo": "dst-adapter",
-      "releaseType": "release"
-    }
-  ],
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
-    "dist": "npm run build && electron-builder",
-    "dist:win": "npm run build && electron-builder --win",
-    "dist:mac": "npm run build && electron-builder --mac",
+    "dist": "npm run build && electron-builder --config electron-builder.config.cjs",
+    "dist:win": "npm run build && electron-builder --config electron-builder.config.cjs --win",
+    "dist:mac": "npm run build && electron-builder --config electron-builder.config.cjs --mac",
     "typecheck": "tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.node.json"
   },
   "dependencies": {
@@ -37,65 +29,5 @@
     "electron-vite": "^2.3.0",
     "typescript": "^5.7.3",
     "vite": "^5.4.14"
-  },
-  "build": {
-    "appId": "com.dasuantou.adapter",
-    "productName": "大算头适配器",
-    "directories": {
-      "output": "release"
-    },
-    "files": [
-      "out/**/*",
-      "resources/**/*"
-    ],
-    "extraResources": [
-      {
-        "from": "resources",
-        "to": "resources"
-      }
-    ],
-    "win": {
-      "icon": "resources/icon.ico",
-      "target": [
-        "nsis",
-        "portable"
-      ]
-    },
-    "mac": {
-      "artifactName": "${name}-${version}-${arch}.${ext}",
-      "target": [
-        {
-          "target": "dmg",
-          "arch": [
-            "universal"
-          ]
-        },
-        {
-          "target": "zip",
-          "arch": [
-            "universal"
-          ]
-        }
-      ],
-      "category": "public.app-category.developer-tools",
-      "hardenedRuntime": false,
-      "gatekeeperAssess": false
-    },
-    "nsis": {
-      "artifactName": "${name}-setup-${version}.${ext}",
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true
-    },
-    "portable": {
-      "artifactName": "${name}-${version}-portable.${ext}"
-    },
-    "protocols": [
-      {
-        "name": "大算头适配器",
-        "schemes": [
-          "dstadapter"
-        ]
-      }
-    ]
   }
 }
