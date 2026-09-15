@@ -1,4 +1,4 @@
-import { createHmac } from 'node:crypto'
+import { createHash, createHmac } from 'node:crypto'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
 
@@ -108,7 +108,7 @@ for (const fileName of files) {
   const date = new Date().toUTCString()
   const contentType = contentTypeFor(fileName)
   const cacheControl = cacheControlFor(fileName)
-  const contentMd5 = body.toString('base64')
+  const contentMd5 = createHash('md5').update(body).digest('base64')
   const canonicalizedHeaders = 'x-oss-object-acl:public-read\n'
   const canonicalizedResource = `/${bucket}/${objectKey}`
   const stringToSign = [
