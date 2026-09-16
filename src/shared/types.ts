@@ -154,6 +154,9 @@ export interface SyncModelsResult {
 /** MCP 服务默认端口（用于非内置服务） */
 export const MCP_DEFAULT_PORT = 17890
 
+/** OpenAI-compatible canonical Base URL used by the bundled DST services. */
+export const DEFAULT_PROVIDER_ENDPOINT = 'https://dst-ai.com/v1'
+
 /** 内置图片生成 MCP 服务（不可删除）。 */
 export const BUILTIN_MCP_IMAGE_ID = 'builtin-mcp-image-generation'
 export const BUILTIN_MCP_IMAGE_PORT = 17888
@@ -162,7 +165,7 @@ export const BUILTIN_MCP_IMAGE_DEFAULTS = {
   name: '图片生成工具',
   type: 'image-generation' as McpServiceType,
   provider: 'dst' as McpProvider,
-  baseUrl: 'https://dst-ai.com',
+  baseUrl: DEFAULT_PROVIDER_ENDPOINT,
   models: ['gemini-3-pro-image', 'gpt-image-2']
 }
 
@@ -174,7 +177,7 @@ export const BUILTIN_MCP_VIDEO_DEFAULTS = {
   name: '视频生成工具',
   type: 'video-generation' as McpServiceType,
   provider: 'dst' as McpProvider,
-  baseUrl: 'https://dst-ai.com',
+  baseUrl: DEFAULT_PROVIDER_ENDPOINT,
   models: ['doubao-seedance-2.0'],
   resolutions: ['480p', '720p', '1080p', '4K'],
   ratios: ['21:9', '16:9', '4:3', '1:1', '3:4', '9:16', 'adaptive'],
@@ -190,7 +193,7 @@ export const BUILTIN_MCP_FILE_UPLOAD_DEFAULTS = {
   name: '文件上传工具',
   type: 'file-upload' as McpServiceType,
   provider: 'dst' as McpProvider,
-  baseUrl: 'https://dst-ai.com'
+  baseUrl: DEFAULT_PROVIDER_ENDPOINT
 }
 
 /** 内置 3D 生成 MCP 服务（不可删除）。 */
@@ -201,7 +204,7 @@ export const BUILTIN_MCP_3D_DEFAULTS = {
   name: '3D 生成工具',
   type: '3d-generation' as McpServiceType,
   provider: 'dst' as McpProvider,
-  baseUrl: 'https://dst-ai.com'
+  baseUrl: DEFAULT_PROVIDER_ENDPOINT
 }
 
 export interface AppSettings {
@@ -222,7 +225,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   locale: 'zh-CN',
   githubAccelerationEnabled: false,
   providerName: 'dst',
-  providerEndpoint: 'https://dst-ai.com',
+  providerEndpoint: DEFAULT_PROVIDER_ENDPOINT,
   providerApiKey: '',
   providerWireApi: 'chat_completions',
   providerVendor: 'dst'

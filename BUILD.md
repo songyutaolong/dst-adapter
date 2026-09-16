@@ -85,7 +85,7 @@ Error: spawn EPERM
 - 常量定义：`src/shared/types.ts` → `BUILTIN_MCP_IMAGE_DEFAULTS`
 - 连接信息：`src/main/store.ts` → `getMcpConnectionInfo()`
 - 设置弹窗 / 卡片 UI：`src/renderer/src/App.tsx`
-- 约定：内置服务 **Base URL 固定内置**（`https://dst-ai.com`），**模型 ID 由请求参数决定**，设置仅填 API Key
+- 约定：内置服务 **Base URL 固定内置**（`https://dst-ai.com/v1`），**模型 ID 由请求参数决定**，设置仅填 API Key
 - 该约定文档：本文件 + 各文件内注释，改需求时同步更新
 
 ## 提交前检查

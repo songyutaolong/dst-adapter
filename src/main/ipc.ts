@@ -1,6 +1,6 @@
 import { app, ipcMain, BrowserWindow, shell, clipboard } from 'electron'
 import type { AppId, Provider, McpService, ModelConfig, ModelInfo, SyncModelsResult } from '../shared/types'
-import { APP_META } from '../shared/types'
+import { APP_META, DEFAULT_PROVIDER_ENDPOINT } from '../shared/types'
 import { listAdapters, getAdapter } from './adapters'
 import {
   createProvider,
@@ -191,7 +191,7 @@ export function registerIpc(getMainWindow: () => BrowserWindow | null): void {
     }
     const serviceWithConn: McpService = {
       ...service,
-      baseUrl: endpoint || 'https://dst-ai.com',
+      baseUrl: endpoint || DEFAULT_PROVIDER_ENDPOINT,
       apiKey
     }
     const result = await launchMcpService(serviceWithConn)

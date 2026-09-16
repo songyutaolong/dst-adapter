@@ -4,6 +4,7 @@ import os from 'os'
 import { randomUUID } from 'crypto'
 import type { AppId, AppSettings, Provider, McpService, Model, ModelInfo, ModelConfig } from '../shared/types'
 import {
+  DEFAULT_PROVIDER_ENDPOINT,
   DEFAULT_SETTINGS,
   APP_META,
   BUILTIN_MCP_IMAGE_ID,
@@ -54,6 +55,30 @@ function emptyStore(): DataStore {
   }
 }
 
+function migrateLegacyEndpoints(store: DataStore): boolean {
+  const legacyEndpoint = 'https://dst-ai.com'
+  let changed = false
+
+  if (store.settings.providerEndpoint === legacyEndpoint) {
+    store.settings.providerEndpoint = DEFAULT_PROVIDER_ENDPOINT
+    changed = true
+  }
+  for (const provider of store.providers) {
+    if (provider.endpoint === legacyEndpoint) {
+      provider.endpoint = DEFAULT_PROVIDER_ENDPOINT
+      changed = true
+    }
+  }
+  for (const service of store.mcpServices) {
+    if (service.baseUrl === legacyEndpoint) {
+      service.baseUrl = DEFAULT_PROVIDER_ENDPOINT
+      changed = true
+    }
+  }
+
+  return changed
+}
+
 function atomicWriteJson(filePath: string, data: unknown): void {
   ensureDir(path.dirname(filePath))
   const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`
@@ -88,7 +113,7 @@ export function loadStore(): DataStore {
       s.running = false
       s.port = undefined
     }
-    return {
+    const store: DataStore = {
       version: parsed.version ?? 1,
       settings: { ...DEFAULT_SETTINGS, ...(parsed.settings || {}) },
       providers: Array.isArray(parsed.providers) ? parsed.providers : [],
@@ -96,6 +121,8 @@ export function loadStore(): DataStore {
       models: Array.isArray(parsed.models) ? parsed.models : [],
       lastSyncAt: parsed.lastSyncAt
     }
+    if (migrateLegacyEndpoints(store)) saveStore(store)
+    return store
   } catch (err) {
     // JSON 损坏/半写：把原文件改名留存（db.json.corrupt-<ts>），
     // 再重建空 store，避免 catch 分支覆盖掉可能仍可抢救的数据
@@ -233,7 +260,7 @@ function syncSharedProviders(store: DataStore): void {
 
   const connection = {
     name: settings.providerName || 'dst',
-    endpoint: settings.providerEndpoint || 'https://dst-ai.com',
+    endpoint: settings.providerEndpoint || DEFAULT_PROVIDER_ENDPOINT,
     apiKey: settings.providerApiKey,
     wireApi: settings.providerWireApi || 'chat_completions',
     vendor: settings.providerVendor || 'dst'
@@ -292,7 +319,7 @@ export function getDstConnection(): {
   if (settings.providerApiKey?.trim()) {
     return {
       name: settings.providerName || 'dst',
-      endpoint: settings.providerEndpoint || 'https://dst-ai.com',
+      endpoint: settings.providerEndpoint || DEFAULT_PROVIDER_ENDPOINT,
       apiKey: settings.providerApiKey,
       wireApi: settings.providerWireApi || 'chat_completions',
       vendor: settings.providerVendor || 'dst'
@@ -310,7 +337,7 @@ export function getDstConnection(): {
   }
   return {
     name: settings.providerName || 'dst',
-    endpoint: settings.providerEndpoint || 'https://dst-ai.com',
+    endpoint: settings.providerEndpoint || DEFAULT_PROVIDER_ENDPOINT,
     apiKey: '',
     wireApi: settings.providerWireApi || 'chat_completions',
     vendor: settings.providerVendor || 'dst'

@@ -14,7 +14,8 @@ import type {
 } from '../../shared/types'
 import {
   BUILTIN_MCP_IMAGE_DEFAULTS,
-  BUILTIN_MCP_VIDEO_DEFAULTS
+  BUILTIN_MCP_VIDEO_DEFAULTS,
+  DEFAULT_PROVIDER_ENDPOINT
 } from '../../shared/types'
 
 type TabId = 'provide' | 'mcp' | 'skill'
@@ -66,7 +67,7 @@ function maskApiKey(key: string): string {
 
 const emptyForm = (): FormState => ({
   name: 'dst',
-  endpoint: 'https://dst-ai.com',
+  endpoint: DEFAULT_PROVIDER_ENDPOINT,
   apiKey: '',
   rawApiKey: undefined,
   wireApi: 'chat_completions',
@@ -238,7 +239,7 @@ export default function App() {
     const apiKey = appSettings?.providerApiKey || existing?.apiKey || ''
     setForm({
       name: appSettings?.providerName || existing?.name || 'dst',
-      endpoint: appSettings?.providerEndpoint || existing?.endpoint || 'https://dst-ai.com',
+      endpoint: appSettings?.providerEndpoint || existing?.endpoint || DEFAULT_PROVIDER_ENDPOINT,
       apiKey: apiKey ? maskApiKey(apiKey) : '',
       rawApiKey: apiKey || undefined,
       wireApi: appSettings?.providerWireApi || existing?.wireApi || 'chat_completions',
@@ -264,7 +265,7 @@ export default function App() {
     try {
       const next = await window.dst.updateSettings({
         providerName: form.name.trim() || 'dst',
-        providerEndpoint: form.endpoint.trim() || 'https://dst-ai.com',
+        providerEndpoint: form.endpoint.trim() || DEFAULT_PROVIDER_ENDPOINT,
         providerApiKey: finalApiKey,
         providerWireApi: form.wireApi,
         providerVendor: form.vendor.trim() || 'dst'

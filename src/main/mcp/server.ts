@@ -235,7 +235,7 @@ async function generateImageGemini(
   prompt: string,
   params?: Record<string, unknown>
 ): Promise<unknown> {
-  const endpoint = `${service.baseUrl.replace(/\/+$/, '')}/v1beta/models/${model}:generateContent`
+  const endpoint = `${toApiRoot(service.baseUrl)}/v1beta/models/${model}:generateContent`
   const imageConfig = resolveGeminiImageConfig(params)
   const body: Record<string, unknown> = {
     contents: [
@@ -323,7 +323,7 @@ async function generateImage(
   const quality = params?.quality
   body.quality = typeof quality === 'string' && ['low', 'medium', 'high'].includes(quality) ? quality : 'medium'
 
-  const endpoint = `${service.baseUrl.replace(/\/+$/, '')}/v1/images/generations`
+  const endpoint = `${toApiRoot(service.baseUrl)}/v1/images/generations`
   const resp = await fetch(endpoint, {
     method: 'POST',
     headers: {
@@ -405,7 +405,7 @@ async function editImageGemini(
   images: DecodedImage[],
   params?: Record<string, unknown>
 ): Promise<unknown> {
-  const endpoint = `${service.baseUrl.replace(/\/+$/, '')}/v1beta/models/${model}:generateContent`
+  const endpoint = `${toApiRoot(service.baseUrl)}/v1beta/models/${model}:generateContent`
 
   // parts 中依次挂载多张输入图，最后是编辑指令文本
   const parts: Array<Record<string, unknown>> = images.map(img => ({
@@ -503,7 +503,7 @@ async function editImage(
   const quality = params?.quality
   fd.append('quality', typeof quality === 'string' && ['low', 'medium', 'high'].includes(quality) ? quality : 'medium')
 
-  const endpoint = `${service.baseUrl.replace(/\/+$/, '')}/v1/images/edits`
+  const endpoint = `${toApiRoot(service.baseUrl)}/v1/images/edits`
   const resp = await fetch(endpoint, {
     method: 'POST',
     // fetch 会根据 FormData 自动生成 multipart boundary 与 content-type
@@ -526,7 +526,7 @@ function pickVideoModel(service: McpService, params?: Record<string, unknown>): 
 
 /** 查询视频生成任务状态（单次查询，不轮询；由调用方控制轮询节奏） */
 async function queryVideoTask(service: McpService, taskId: string): Promise<unknown> {
-  const endpoint = `${service.baseUrl.replace(/\/+$/, '')}/v1/video/generations/${taskId}`
+  const endpoint = `${toApiRoot(service.baseUrl)}/v1/video/generations/${taskId}`
 
   const resp = await fetch(endpoint, {
     method: 'GET',
@@ -627,7 +627,7 @@ async function generateVideo(
   body.metadata = metadata
 
   // 提交任务
-  const endpoint = `${service.baseUrl.replace(/\/+$/, '')}/v1/video/generations`
+  const endpoint = `${toApiRoot(service.baseUrl)}/v1/video/generations`
   const resp = await fetch(endpoint, {
     method: 'POST',
     headers: {
@@ -781,7 +781,7 @@ async function generateVideoFromImage(
   body.metadata = metadata
 
   // 提交任务
-  const endpoint = `${service.baseUrl.replace(/\/+$/, '')}/v1/video/generations`
+  const endpoint = `${toApiRoot(service.baseUrl)}/v1/video/generations`
   const resp = await fetch(endpoint, {
     method: 'POST',
     headers: {
