@@ -9,9 +9,8 @@ import type {
   McpService,
   Model,
   ModelConfig,
+  SkillCatalogResult,
   SyncModelsResult,
-  GithubAccelerationResult,
-  GithubAccelerationStatus,
   UpdateState
 } from '../shared/types'
 
@@ -43,10 +42,6 @@ const api = {
   ): Promise<{ ok: boolean; models: string[]; error?: string }> =>
     ipcRenderer.invoke('providers:fetchModels', endpoint, apiKey),
   getSettings: (): Promise<AppSettings> => ipcRenderer.invoke('settings:get'),
-  getGithubAccelerationStatus: (): Promise<GithubAccelerationStatus> =>
-    ipcRenderer.invoke('github-acceleration:get'),
-  toggleGithubAcceleration: (enabled: boolean): Promise<GithubAccelerationResult> =>
-    ipcRenderer.invoke('github-acceleration:toggle', enabled),
   updateSettings: (patch: Partial<AppSettings>): Promise<AppSettings> =>
     ipcRenderer.invoke('settings:update', patch),
   getDataDir: (): Promise<string> => ipcRenderer.invoke('system:dataDir'),
@@ -55,6 +50,8 @@ const api = {
     app: AppId
   ): Promise<{ ok?: boolean; message?: string }> =>
     ipcRenderer.invoke('adapters:launch', app),
+  isAppRunning: (app: AppId): Promise<boolean> =>
+    ipcRenderer.invoke('adapters:is-running', app),
   downloadApp: (app: AppId): Promise<boolean> =>
     ipcRenderer.invoke('apps:download', app),
   onDeepLinkImported: (cb: (provider: Provider) => void) => {
@@ -86,6 +83,16 @@ const api = {
     ipcRenderer.invoke('mcp:info', id),
   writeClipboard: (text: string): Promise<boolean> =>
     ipcRenderer.invoke('clipboard:write', text),
+  // Skills
+  listSkillCatalog: (app: AppId = 'workbuddy', force = false): Promise<SkillCatalogResult> =>
+    ipcRenderer.invoke('skills:catalog:list', app, force),
+  setSkillEnabled: (id: string, enabled: boolean, app: AppId = 'workbuddy'): Promise<ApplyResult> =>
+    ipcRenderer.invoke('skills:set-enabled', app, id, enabled),
+  updateSkill: (
+    id: string,
+    app: AppId = 'workbuddy'
+  ): Promise<ApplyResult> =>
+    ipcRenderer.invoke('skills:update', app, id),
   // Models
   listModels: (app?: AppId): Promise<Model[]> =>
     ipcRenderer.invoke('models:list', app),

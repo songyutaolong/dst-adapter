@@ -59,6 +59,11 @@ function migrateLegacyEndpoints(store: DataStore): boolean {
   const legacyEndpoint = 'https://dst-ai.com'
   let changed = false
 
+  if ('githubAccelerationEnabled' in store.settings) {
+    delete store.settings.githubAccelerationEnabled
+    changed = true
+  }
+
   if (store.settings.providerEndpoint === legacyEndpoint) {
     store.settings.providerEndpoint = DEFAULT_PROVIDER_ENDPOINT
     changed = true

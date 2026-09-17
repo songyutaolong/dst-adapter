@@ -9,8 +9,9 @@ import type {
   McpService,
   Model,
   ModelConfig,
-  UpdateState,
-  GithubAccelerationResult
+  RemoteSkillPackage,
+  SkillCatalogResult,
+  UpdateState
 } from '../../shared/types'
 import {
   BUILTIN_MCP_IMAGE_DEFAULTS,
@@ -87,7 +88,6 @@ export default function App() {
   const [version, setVersion] = useState('')
   const [settings, setSettings] = useState<AppSettings | null>(null)
   const [showSettings, setShowSettings] = useState(false)
-  const [githubBusy, setGithubBusy] = useState(false)
   const [form, setForm] = useState<FormState>(emptyForm())
   const [busy, setBusy] = useState(false)
   const [syncing, setSyncing] = useState(false)
@@ -113,6 +113,12 @@ export default function App() {
   // MCP Services
   const [mcpServices, setMcpServices] = useState<McpService[]>([])
   const didFullRefreshRef = useRef(false)
+  const [skillCatalog, setSkillCatalog] = useState<SkillCatalogResult | null>(null)
+  const [skillLoading, setSkillLoading] = useState(false)
+  const [skillError, setSkillError] = useState('')
+  const [skillReloadToken, setSkillReloadToken] = useState(0)
+  const [skillAction, setSkillAction] = useState('')
+  const [skillCloseRequired, setSkillCloseRequired] = useState(false)
 
   const currentMeta = useMemo(
     () => apps.find((a) => a.id === currentApp),
@@ -157,6 +163,35 @@ export default function App() {
       showToast(err instanceof Error ? err.message : String(err), true)
     )
   }, [refresh, showToast])
+
+  useEffect(() => {
+    if (activeTab !== 'skill') return
+
+    let cancelled = false
+    setSkillLoading(true)
+    setSkillError('')
+    setSkillCloseRequired(false)
+
+    window.dst
+      .listSkillCatalog(currentApp)
+      .then((result) => {
+        if (cancelled) return
+        setSkillCatalog(result)
+        setSkillError(result.ok ? '' : result.message)
+      })
+      .catch((err) => {
+        if (cancelled) return
+        setSkillCatalog(null)
+        setSkillError(err instanceof Error ? err.message : String(err))
+      })
+      .finally(() => {
+        if (!cancelled) setSkillLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [activeTab, currentApp, skillReloadToken])
 
   // 切换应用只刷新轻量数据，避免重新探测所有应用。
   useEffect(() => {
@@ -354,22 +389,6 @@ export default function App() {
     }
   }
 
-  const toggleGithubAcceleration = async () => {
-    if (!settings) return
-    setGithubBusy(true)
-    try {
-      const result: GithubAccelerationResult = await window.dst.toggleGithubAcceleration(
-        !settings.githubAccelerationEnabled
-      )
-      setSettings(await window.dst.getSettings())
-      showToast(result.message, !result.ok)
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : String(err), true)
-    } finally {
-      setGithubBusy(false)
-    }
-  }
-
   // 启用模型
   const onEnableModel = async (id: string) => {
     setBusy(true)
@@ -450,6 +469,59 @@ export default function App() {
       showToast(err instanceof Error ? err.message : String(err), true)
     } finally {
       setBusy(false)
+    }
+  }
+
+  const formatSkillSize = (size: number) => {
+    if (size < 1024) return `${size} B`
+    if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
+    return `${(size / (1024 * 1024)).toFixed(1)} MB`
+  }
+
+  const onRefreshSkills = () => {
+    setSkillReloadToken((token) => token + 1)
+  }
+
+  const onSetSkillEnabled = async (id: string, enabled: boolean) => {
+    setSkillAction(id)
+    try {
+      const result = await window.dst.setSkillEnabled(id, enabled, currentApp)
+      showToast(result.message)
+      setSkillCatalog((current) =>
+        current
+          ? {
+              ...current,
+              skills: current.skills.map((skill) =>
+                skill.id === id ? { ...skill, enabled } : skill
+              )
+            }
+          : current
+      )
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), true)
+    } finally {
+      setSkillAction('')
+    }
+  }
+
+  const onUpdateSkill = async (skill: RemoteSkillPackage) => {
+    setSkillAction(skill.id)
+    try {
+      const workBuddyRunning = currentApp === 'workbuddy' &&
+        await window.dst.isAppRunning(currentApp)
+      if (workBuddyRunning) {
+        setSkillCloseRequired(true)
+        showToast('WorkBuddy 正在运行；请先手动关闭后，再点击安装/更新', true)
+        return
+      }
+      setSkillCloseRequired(false)
+      const result = await window.dst.updateSkill(skill.id, currentApp)
+      showToast(result.message, !result.ok)
+      setSkillReloadToken((token) => token + 1)
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), true)
+    } finally {
+      setSkillAction('')
     }
   }
 
@@ -752,25 +824,6 @@ export default function App() {
                         保存配置
                       </button>
                     </div>
-                  </div>
-                </section>
-
-                <section className="settings-section">
-                  <h3>GitHub 加速</h3>
-                  <p className="settings-desc">解析 GitHub 相关 IP，并写入本机 hosts 托管配置块。</p>
-                  <div className="settings-switch-row">
-                    <span>GitHub 加速</span>
-                    <button
-                      type="button"
-                      className={`switch ${settings?.githubAccelerationEnabled ? 'on' : ''}`}
-                      role="switch"
-                      aria-checked={Boolean(settings?.githubAccelerationEnabled)}
-                      aria-label="GitHub 加速"
-                      onClick={toggleGithubAcceleration}
-                      disabled={githubBusy}
-                    >
-                      <span className="switch-knob" />
-                    </button>
                   </div>
                 </section>
 
@@ -1154,18 +1207,114 @@ export default function App() {
                 <div>
                   <h2>技能管理</h2>
                   <div className="sub" style={{ color: 'var(--muted)', fontSize: 12 }}>
-                    管理 {currentMeta?.name || currentApp} 的可复用 AI 技能模板
+                    管理 {currentMeta?.name || currentApp} 的远端 Skill 目录
                   </div>
                 </div>
+                <button className="btn secondary" disabled={skillLoading} onClick={onRefreshSkills}>
+                  ↻ 刷新
+                </button>
               </div>
-              <div className="panel-body">
-                <div className="empty">
-                  <div className="empty-icon">🧩</div>
-                  <div>Skill 技能管理框架已搭建，具体实现将在后续版本完成。</div>
-                  <div className="sub" style={{ marginTop: 8 }}>
-                    支持自定义 Prompt 模板、工具链编排等技能。
+              {skillCloseRequired && (
+                <div className="feature-banner">
+                  <div>
+                    <strong>WorkBuddy 正在运行</strong>
+                    <span>请先手动关闭 WorkBuddy；完全退出后，再点击安装/更新。</span>
                   </div>
                 </div>
+              )}
+              <div className="panel-body">
+                {skillLoading ? (
+                  <div className="empty">
+                    <div className="empty-icon">🧩</div>
+                    <div>正在获取 Skill 目录…</div>
+                  </div>
+                ) : skillError && !skillCatalog?.skills.length ? (
+                  <div className="empty">
+                    <div className="empty-icon">⚠️</div>
+                    <div>{skillError}</div>
+                    <div className="sub" style={{ marginTop: 8 }}>
+                      请确认当前应用支持 Skill 仓储，并且 Provider 已返回 OSS 配置。
+                    </div>
+                  </div>
+                ) : !skillCatalog?.skills.length ? (
+                  <div className="empty">
+                    <div className="empty-icon">🧩</div>
+                    <div>Skill 仓储暂无可用技能。</div>
+                  </div>
+                ) : (
+                  <div className="list">
+                    {skillCatalog.skills.map((skill: RemoteSkillPackage) => (
+                      <div key={`${skill.id}-${skill.version}`} className="card">
+                        <div>
+                          <h4>
+                            {skill.name}
+                            <span className="badge">v{skill.version}</span>
+                          </h4>
+                          {skill.description && <div className="sub">{skill.description}</div>}
+                          <div className="sub">
+                            {[
+                              skill.vendor && `厂商：${skill.vendor}`,
+                              skill.localVersion && `本地版本：v${skill.localVersion}`,
+                              `大小：${formatSkillSize(skill.size)}`,
+                              skill.minWorkBuddyVersion &&
+                                `最低版本：v${skill.minWorkBuddyVersion}`,
+                              `对象：${skill.objectKey}`
+                            ]
+                              .filter(Boolean)
+                              .join(' · ')}
+                          </div>
+                          <div className="row mcp-actions">
+                            <button
+                              className="btn primary"
+                              disabled={!skill.installed || skill.enabled || skillAction === skill.id}
+                              onClick={() => onSetSkillEnabled(skill.id, true)}
+                            >
+                              启用
+                            </button>
+                            <button
+                              className="btn danger"
+                              disabled={!skill.installed || !skill.enabled || skillAction === skill.id}
+                              onClick={() => onSetSkillEnabled(skill.id, false)}
+                            >
+                              停用
+                            </button>
+                            {!skill.installed && (
+                              <button
+                                className="btn primary"
+                                disabled={skillAction === skill.id}
+                                onClick={() => onUpdateSkill(skill)}
+                              >
+                                {skillAction === skill.id ? '安装中...' : '安装'}
+                              </button>
+                            )}
+                            {skill.installed && skill.updateAvailable && (
+                              <button
+                                className="btn primary"
+                                disabled={skillAction === skill.id}
+                                onClick={() => onUpdateSkill(skill)}
+                              >
+                                {skillAction === skill.id ? '更新中...' : '更新'}
+                              </button>
+                            )}
+                            {!skill.installed && <span className="badge">未安装</span>}
+                            {skill.installed && (
+                              <span className="badge">{skill.enabled ? '已启用' : '已停用'}</span>
+                            )}
+                            {skill.localVersion && (
+                              <span className="badge">本地 v{skill.localVersion}</span>
+                            )}
+                            {skill.updateAvailable && <span className="badge warn">可更新</span>}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {skillError && skillCatalog?.skills.length ? (
+                  <div className="sub" style={{ marginTop: 10, color: 'var(--danger)' }}>
+                    {skillError}
+                  </div>
+                ) : null}
               </div>
             </>
           )}

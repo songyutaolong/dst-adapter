@@ -128,27 +128,46 @@ export interface ApplyResult {
   backupPath?: string
 }
 
-/** GitHub hosts 加速状态 */
-export interface GithubAccelerationStatus {
-  enabled: boolean
-  /** hosts 中是否存在本应用创建的托管配置块 */
-  managed: boolean
-  entryCount: number
-  hostsPath: string
-}
-
-export interface GithubAccelerationResult extends GithubAccelerationStatus {
-  ok: boolean
-  message: string
-  backupPath?: string
-}
-
 export interface SyncModelsResult {
   ok: boolean
   message: string
   models?: ModelInfo[]
   count?: number
   lastSyncAt?: string
+}
+
+/** OSS Skill 仓储中的可安装包；凭据和签名 URL 不进入渲染进程。 */
+export interface RemoteSkillPackage {
+  id: string
+  name: string
+  version: string
+  objectKey: string
+  size: number
+  description?: string
+  vendor?: string
+  minWorkBuddyVersion?: string
+  sha256?: string
+  etag?: string
+  lastModified?: string
+  installed?: boolean
+  enabled?: boolean
+  localVersion?: string
+  updateAvailable?: boolean
+}
+
+export interface SkillRepositoryInfo {
+  provider: 'oss' | 'cos'
+  bucket: string
+  prefix?: string
+}
+
+export interface SkillCatalogResult {
+  ok: boolean
+  message: string
+  skills: RemoteSkillPackage[]
+  repository?: SkillRepositoryInfo
+  generatedAt?: string
+  fromCache?: boolean
 }
 
 /** MCP 服务默认端口（用于非内置服务） */
@@ -166,7 +185,7 @@ export const BUILTIN_MCP_IMAGE_DEFAULTS = {
   type: 'image-generation' as McpServiceType,
   provider: 'dst' as McpProvider,
   baseUrl: DEFAULT_PROVIDER_ENDPOINT,
-  models: ['gemini-3-pro-image', 'gpt-image-2']
+  models: ['gemini-3-pro-image', 'gpt-image-2', 'gpt-image-2.5-flare', 'gpt-image-2.5-sunburst']
 }
 
 /** 内置视频生成 MCP 服务（不可删除）。 */
@@ -211,7 +230,6 @@ export interface AppSettings {
   launchAtLogin: boolean
   backupKeep: number
   locale: 'zh-CN'
-  githubAccelerationEnabled: boolean
   providerName: string
   providerEndpoint: string
   providerApiKey: string
@@ -223,7 +241,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   launchAtLogin: false,
   backupKeep: 10,
   locale: 'zh-CN',
-  githubAccelerationEnabled: false,
   providerName: 'dst',
   providerEndpoint: DEFAULT_PROVIDER_ENDPOINT,
   providerApiKey: '',

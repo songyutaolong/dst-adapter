@@ -38,7 +38,6 @@ import {
   quitAndInstall
 } from './update'
 import { applyLaunchAtLogin } from './login'
-import { getGithubAccelerationStatus, setGithubAcceleration } from './github-accelerator'
 
 export function registerIpc(getMainWindow: () => BrowserWindow | null): void {
   ipcMain.handle('apps:list', async () => {
@@ -103,10 +102,6 @@ export function registerIpc(getMainWindow: () => BrowserWindow | null): void {
   )
 
   ipcMain.handle('settings:get', () => getSettings())
-  ipcMain.handle('github-acceleration:get', () => getGithubAccelerationStatus())
-  ipcMain.handle('github-acceleration:toggle', (_e, enabled: boolean) =>
-    setGithubAcceleration(Boolean(enabled))
-  )
   ipcMain.handle('settings:update', (_e, patch) => {
     const next = updateSettings(patch)
     if (typeof patch?.launchAtLogin === 'boolean') {
@@ -124,6 +119,12 @@ export function registerIpc(getMainWindow: () => BrowserWindow | null): void {
     const result = await adapter.launch()
     if (result && typeof result === 'object') return result
     return { ok: true, message: '已尝试启动应用' }
+  })
+
+  ipcMain.handle('adapters:is-running', async (_e, app: AppId) => {
+    const adapter = getAdapter(app)
+    if (!adapter.isRunning) throw new Error(`${adapter.name} 尚不支持运行状态检测`)
+    return adapter.isRunning()
   })
 
   ipcMain.handle('apps:download', async (_e, appId: AppId) => {
@@ -211,6 +212,45 @@ export function registerIpc(getMainWindow: () => BrowserWindow | null): void {
     clipboard.writeText(text)
     return true
   })
+
+  // ── Skills ──
+
+  ipcMain.handle(
+    'skills:catalog:list',
+    async (_e, app?: AppId, force?: boolean) => {
+      const adapter = getAdapter(app || 'workbuddy')
+      if (!adapter.listSkills) {
+        throw new Error(`${adapter.name} 尚不支持 Skill 仓储`)
+      }
+      return adapter.listSkills(Boolean(force))
+    }
+  )
+
+  ipcMain.handle(
+    'skills:set-enabled',
+    async (_e, app?: AppId, id?: string, enabled?: boolean) => {
+      if (!id || typeof enabled !== 'boolean') {
+        throw new Error('Skill 开关参数无效')
+      }
+      const adapter = getAdapter(app || 'workbuddy')
+      if (!adapter.setSkillEnabled) {
+        throw new Error(`${adapter.name} 尚不支持 Skill 开关`)
+      }
+      return adapter.setSkillEnabled(id, enabled)
+    }
+  )
+
+  ipcMain.handle(
+    'skills:update',
+    async (_e, app?: AppId, id?: string) => {
+      if (!id) throw new Error('Skill 更新参数无效')
+      const adapter = getAdapter(app || 'workbuddy')
+      if (!adapter.updateSkill) {
+        throw new Error(`${adapter.name} 尚不支持 Skill 在线更新`)
+      }
+      return adapter.updateSkill(id)
+    }
+  )
 
   // ── Models ──
 

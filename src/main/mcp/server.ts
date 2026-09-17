@@ -1346,7 +1346,8 @@ function listTools(serviceType: string): unknown[] {
     return [
       {
         name: 'image_generation',
-        description: '生成图片（支持 Gemini 3 Pro Image / GPT Image 2），模型由参数 model 指定',
+        description:
+          '生成图片（支持 Gemini 3 Pro Image / GPT Image 2 / GPT Image 2.5 Flare / GPT Image 2.5 Sunburst），模型由参数 model 指定',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1354,7 +1355,8 @@ function listTools(serviceType: string): unknown[] {
             model: {
               type: 'string',
               enum: BUILTIN_MCP_IMAGE_DEFAULTS.models,
-              description: '模型 ID，缺省使用默认模型'
+              description:
+                '模型 ID，缺省使用默认模型；gpt-image-2.5-flare 偏极速生成，gpt-image-2.5-sunburst 偏高精度精修与多轮迭代一致性'
             },
             n: { type: 'integer', description: '生成数量，默认 1' },
             size: {
@@ -1378,7 +1380,8 @@ function listTools(serviceType: string): unknown[] {
       },
       {
         name: 'image_editing',
-        description: '图生图（基于输入图片重绘/编辑，支持 Gemini 3 Pro Image / GPT Image 2），模型由参数 model 指定',
+        description:
+          '图生图（基于输入图片重绘/编辑，支持 Gemini 3 Pro Image / GPT Image 2 / GPT Image 2.5 Flare / GPT Image 2.5 Sunburst），模型由参数 model 指定',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1393,7 +1396,8 @@ function listTools(serviceType: string): unknown[] {
             model: {
               type: 'string',
               enum: BUILTIN_MCP_IMAGE_DEFAULTS.models,
-              description: '模型 ID，缺省使用默认模型'
+              description:
+                '模型 ID，缺省使用默认模型；gpt-image-2.5-flare 偏极速生成，gpt-image-2.5-sunburst 偏高精度精修与多轮迭代一致性'
             },
             n: { type: 'integer', description: '生成数量，默认 1' },
             size: {
