@@ -197,7 +197,7 @@ export const BUILTIN_MCP_VIDEO_DEFAULTS = {
   type: 'video-generation' as McpServiceType,
   provider: 'dst' as McpProvider,
   baseUrl: DEFAULT_PROVIDER_ENDPOINT,
-  models: ['doubao-seedance-2.0'],
+  models: ['doubao-seedance-2.0', 'doubao-seedance-2-0-260128'],
   resolutions: ['480p', '720p', '1080p', '4K'],
   ratios: ['21:9', '16:9', '4:3', '1:1', '3:4', '9:16', 'adaptive'],
   fps: [24, 60],

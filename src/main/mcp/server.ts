@@ -2,7 +2,7 @@ import http from 'http'
 import { createHash, createHmac, randomUUID } from 'crypto'
 import { readFile, stat } from 'fs/promises'
 import path from 'path'
-import type { AddressInfo } from 'net'
+import { isIP, type AddressInfo } from 'net'
 import type { McpService } from '../../shared/types'
 import { toApiRoot } from '../../shared/url'
 import {
@@ -20,8 +20,8 @@ import {
  * - 工具：
  *   - image_generation 文生图（模型 ID 由请求参数 model 决定）
  *   - image_editing    图生图/编辑（输入图片 Base64 + 编辑指令，支持多参考图：image 可传 string 或多张 string[]）
- *   - video_generation 文生视频（提交任务，返回 task_id；支持 doubao-seedance-2.0）
- *   - video_from_image 图生视频（提交任务，返回 task_id）
+ *   - video_generation 文生/参考内容生视频（提交任务，返回 task_id）
+ *   - video_from_image 参考内容生视频（参考图、帧控制、参考视频、参考音频）
  *   - video_task_query 查询视频生成任务状态（单次查询，不轮询；轮询节奏由调用方控制）
  *   - file_upload      文件上传（返回临时公网访问 URL；支持腾讯 COS / 阿里 OSS）
  *   - text_to_model_3d / image_to_model_3d / multiview_to_model_3d
@@ -131,6 +131,44 @@ const THREE_D_METADATA_SCHEMA = {
   },
   additionalProperties: true
 }
+
+const VIDEO_CONTENT_SCHEMA = {
+  type: 'array',
+  items: {
+    type: 'object',
+    properties: {
+      type: {
+        type: 'string',
+        enum: ['text', 'image_url', 'video_url', 'audio_url'],
+        description: '内容类型：text（提示文本）、image_url（图片）、video_url（公网参考视频 URL）、audio_url（公网参考音频 URL）'
+      },
+      text: { type: 'string', description: '文本内容（type=text 时必填）' },
+      image_url: {
+        type: 'object',
+        properties: { url: { type: 'string', description: '图片 URL（type=image_url 时必填）' } },
+        required: ['url']
+      },
+      video_url: {
+        type: 'object',
+        properties: { url: { type: 'string', description: '互联网可访问的参考视频 URL（type=video_url 时必填）' } },
+        required: ['url']
+      },
+      audio_url: {
+        type: 'object',
+        properties: { url: { type: 'string', description: '互联网可访问的参考音频 URL（type=audio_url 时必填）' } },
+        required: ['url']
+      },
+      role: {
+        type: 'string',
+        enum: ['reference_image', 'first_frame', 'last_frame', 'reference_video', 'reference_audio'],
+        description: '内容角色；video_url 使用 reference_video，audio_url 使用 reference_audio'
+      }
+    },
+    required: ['type']
+  },
+  description:
+    '内容数组：支持参考图、首帧（可选尾帧）、互联网可访问的参考视频/音频 URL，以及可选 text 提示；media 类型必须提供至少一项'
+} as const
 
 export interface McpServerHandle {
   server: http.Server
@@ -524,6 +562,153 @@ function pickVideoModel(service: McpService, params?: Record<string, unknown>): 
   return supported.includes(requested) ? requested : service.modelId || BUILTIN_MCP_VIDEO_DEFAULTS.models[0]
 }
 
+function isPublicIpv4(host: string): boolean {
+  const parts = host.split('.').map(Number)
+  if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) return false
+
+  const [a, b] = parts
+  if (a === 0 || a === 10 || a === 127 || a >= 224) return false
+  if (a === 169 && b === 254) return false
+  if (a === 172 && b >= 16 && b <= 31) return false
+  if (a === 192 && b === 168) return false
+  if (a === 100 && b >= 64 && b <= 127) return false
+  if (a === 198 && (b === 18 || b === 19)) return false
+  return true
+}
+
+function isPublicIpv6(host: string): boolean {
+  const value = host.split('%')[0].toLowerCase()
+  if (!value || value === '::' || value === '::1') return false
+  if (value.startsWith('::ffff:')) return isPublicIpv4(value.slice(7))
+  if (value.startsWith('fe8') || value.startsWith('fc') || value.startsWith('fd')) return false
+  return true
+}
+
+function assertInternetHttpUrl(value: unknown, fieldName: string): void {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw { code: -32602, message: `${fieldName} 必须是互联网可访问的 http/https URL 字符串` } as JsonRpcError
+  }
+
+  let url: URL
+  try {
+    url = new URL(value.trim())
+  } catch {
+    throw { code: -32602, message: `${fieldName} 不是合法 URL: ${value.trim()}` } as JsonRpcError
+  }
+
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw { code: -32602, message: `${fieldName} 只支持 http/https URL，当前协议为 ${url.protocol}` } as JsonRpcError
+  }
+
+  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  if (!host || host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) {
+    throw { code: -32602, message: `${fieldName} 不能使用本机或本地域名，必须是互联网可访问的 URL` } as JsonRpcError
+  }
+
+  const ipVersion = isIP(host)
+  if (ipVersion === 4 && !isPublicIpv4(host)) {
+    throw { code: -32602, message: `${fieldName} 不能使用私有、回环或链路本地地址` } as JsonRpcError
+  }
+  if (ipVersion === 6 && !isPublicIpv6(host)) {
+    throw { code: -32602, message: `${fieldName} 不能使用私有、回环或链路本地地址` } as JsonRpcError
+  }
+}
+
+function extractVideoContent(params: Record<string, unknown> | undefined, required: boolean): unknown {
+  const direct = params?.content
+  const nested = params?.metadata
+  const nestedContent =
+    nested && typeof nested === 'object' && !Array.isArray(nested)
+      ? (nested as Record<string, unknown>).content
+      : undefined
+
+  if (direct !== undefined && nestedContent !== undefined) {
+    throw { code: -32602, message: 'content 与 metadata.content 不能同时提供，请只传一个' } as JsonRpcError
+  }
+
+  const content = direct !== undefined ? direct : nestedContent
+  if (required && content === undefined) {
+    throw { code: -32602, message: '缺少参数 content（内容数组），必须提供至少一项媒体内容' } as JsonRpcError
+  }
+  return content
+}
+
+function validateVideoContent(value: unknown): unknown[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw { code: -32602, message: 'content 必须是非空数组，且至少包含一项媒体内容' } as JsonRpcError
+  }
+
+  const items = value as Array<Record<string, unknown>>
+  const imageItems = items.filter(item => item.type === 'image_url')
+  const mediaCount = imageItems.length + items.filter(item => item.type === 'video_url' || item.type === 'audio_url').length
+  if (mediaCount === 0) {
+    throw { code: -32602, message: 'content 中必须包含至少一项 image_url、video_url 或 audio_url 媒体内容' } as JsonRpcError
+  }
+
+  for (const item of items) {
+    const type = item.type
+    if (type === 'text') {
+      if (typeof item.text !== 'string') {
+        throw { code: -32602, message: 'content 中 type=text 的项必须包含 text 字段' } as JsonRpcError
+      }
+      continue
+    }
+
+    if (type === 'image_url' || type === 'video_url' || type === 'audio_url') {
+      const media = item[type] as Record<string, unknown> | undefined
+      if (!media || typeof media.url !== 'string') {
+        throw { code: -32602, message: `content 中 type=${type} 的项必须包含 ${type}.url 字段` } as JsonRpcError
+      }
+      assertInternetHttpUrl(media.url, `content 中 type=${type} 的 ${type}.url`)
+
+      const expectedRole =
+        type === 'video_url' ? 'reference_video' : type === 'audio_url' ? 'reference_audio' : undefined
+      if (expectedRole && item.role !== expectedRole) {
+        throw { code: -32602, message: `content 中 type=${type} 的项 role 必须为 ${expectedRole}` } as JsonRpcError
+      }
+      if (!expectedRole && !['reference_image', 'first_frame', 'last_frame'].includes(String(item.role))) {
+        throw {
+          code: -32602,
+          message: 'content 中 type=image_url 的项必须包含 role 字段（reference_image/first_frame/last_frame）'
+        } as JsonRpcError
+      }
+      continue
+    }
+
+    throw {
+      code: -32602,
+      message: `content 项 type 必须为 text、image_url、video_url 或 audio_url，当前为 ${String(type)}`
+    } as JsonRpcError
+  }
+
+  const refs = imageItems.filter(item => item.role === 'reference_image')
+  const firsts = imageItems.filter(item => item.role === 'first_frame')
+  const lasts = imageItems.filter(item => item.role === 'last_frame')
+  const hasRefs = refs.length > 0
+  const hasFirstLast = firsts.length > 0 || lasts.length > 0
+
+  if (hasRefs && hasFirstLast) {
+    throw {
+      code: -32602,
+      message: 'reference_image（参考图）和 first_frame/last_frame（首尾帧）不能混用，请选择一种模式'
+    } as JsonRpcError
+  }
+  if (imageItems.length > 0 && !hasRefs && !hasFirstLast) {
+    throw {
+      code: -32602,
+      message: 'content 中 type=image_url 的项 role 必须为 reference_image、first_frame 或 last_frame'
+    } as JsonRpcError
+  }
+  if (hasFirstLast && (firsts.length !== 1 || lasts.length > 1)) {
+    throw {
+      code: -32602,
+      message: `帧控制模式必须恰好 1 个 first_frame，last_frame 最多 1 个，当前 first_frame=${firsts.length}, last_frame=${lasts.length}`
+    } as JsonRpcError
+  }
+
+  return value
+}
+
 /** 查询视频生成任务状态（单次查询，不轮询；由调用方控制轮询节奏） */
 async function queryVideoTask(service: McpService, taskId: string): Promise<unknown> {
   const endpoint = `${toApiRoot(service.baseUrl)}/v1/video/generations/${taskId}`
@@ -557,7 +742,7 @@ async function queryVideoTask(service: McpService, taskId: string): Promise<unkn
   }
 }
 
-/** 调用上游视频生成 API（文生视频，异步任务模式） */
+/** 调用上游视频生成 API（文生/参考内容生视频，异步任务模式） */
 async function generateVideo(
   service: McpService,
   params?: Record<string, unknown>
@@ -571,13 +756,15 @@ async function generateVideo(
   }
 
   const model = pickVideoModel(service, params)
+  const rawContent = extractVideoContent(params, false)
+  const content = rawContent === undefined ? undefined : validateVideoContent(rawContent)
   const body: Record<string, unknown> = {
     model,
     prompt
   }
 
   // 可选参数统一放入 metadata：resolution
-  const metadata: Record<string, unknown> = {}
+  const metadata: Record<string, unknown> = content === undefined ? {} : { content }
 
   const resolution = params?.resolution
   if (typeof resolution === 'string' && resolution.trim()) {
@@ -660,7 +847,7 @@ async function generateVideo(
   }
 }
 
-/** 调用上游视频生成 API（图生视频，异步任务模式，支持参考图/首尾帧两种模式） */
+/** 调用上游视频生成 API（参考内容生视频，支持图片、帧控制、视频与音频引用） */
 async function generateVideoFromImage(
   service: McpService,
   params?: Record<string, unknown>
@@ -673,53 +860,8 @@ async function generateVideoFromImage(
     throw { code: -32602, message: '缺少参数 prompt（视频描述）' } as JsonRpcError
   }
 
-  // 统一 content 处理（参考图和首尾帧都用 content）
-  const content = params?.content
-  if (!Array.isArray(content) || content.length === 0) {
-    throw { code: -32602, message: '缺少参数 content（图片内容数组），必须提供至少一项' } as JsonRpcError
-  }
-
-  // 按 role 分组
-  const refs = content.filter(c => (c as Record<string, unknown>).role === 'reference_image')
-  const firsts = content.filter(c => (c as Record<string, unknown>).role === 'first_frame')
-  const lasts = content.filter(c => (c as Record<string, unknown>).role === 'last_frame')
-
-  const hasRefs = refs.length > 0
-  const hasFirstLast = firsts.length > 0 || lasts.length > 0
-
-  // 互斥校验：reference_image 与 first_frame/last_frame 不能混用
-  if (hasRefs && hasFirstLast) {
-    throw { code: -32602, message: 'reference_image（参考图）和 first_frame/last_frame（首尾帧）不能混用，请选择一种模式' } as JsonRpcError
-  }
-  if (!hasRefs && !hasFirstLast) {
-    throw { code: -32602, message: 'content 中必须包含至少一张图片（role 为 reference_image、first_frame 或 last_frame）' } as JsonRpcError
-  }
-
-  // 首尾帧模式校验：必须恰好 1 个 first_frame + 1 个 last_frame
-  if (hasFirstLast) {
-    if (firsts.length !== 1 || lasts.length !== 1) {
-      throw { code: -32602, message: `首尾帧模式必须恰好 1 个 first_frame 和 1 个 last_frame，当前 first_frame=${firsts.length}, last_frame=${lasts.length}` } as JsonRpcError
-    }
-  }
-
-  // 校验每项格式
-  for (const item of content as Array<Record<string, unknown>>) {
-    const type = item.type
-    if (type === 'text') {
-      if (typeof item.text !== 'string') {
-        throw { code: -32602, message: 'content 中 type=text 的项必须包含 text 字段' } as JsonRpcError
-      }
-    } else if (type === 'image_url') {
-      if (!item.image_url || typeof (item.image_url as Record<string, unknown>).url !== 'string') {
-        throw { code: -32602, message: 'content 中 type=image_url 的项必须包含 image_url.url 字段' } as JsonRpcError
-      }
-      if (!item.role) {
-        throw { code: -32602, message: 'content 中 type=image_url 的项必须包含 role 字段（reference_image/first_frame/last_frame）' } as JsonRpcError
-      }
-    } else {
-      throw { code: -32602, message: `content 项 type 必须为 text 或 image_url，当前为 ${String(type)}` } as JsonRpcError
-    }
-  }
+  // 统一 content 处理：参考图、帧控制、参考视频和参考音频都用 content。
+  const content = validateVideoContent(extractVideoContent(params, true))
 
   const model = pickVideoModel(service, params)
   // content 与可选参数统一放入 metadata
@@ -770,12 +912,6 @@ async function generateVideoFromImage(
   const watermark = params?.watermark
   if (typeof watermark === 'boolean') {
     metadata.watermark = watermark
-  }
-
-  // 可选参数：reference_video
-  const referenceVideo = params?.reference_video
-  if (typeof referenceVideo === 'string' && referenceVideo.trim()) {
-    metadata.reference_video = referenceVideo.trim() // Base64 编码的参考视频
   }
 
   body.metadata = metadata
@@ -1424,11 +1560,18 @@ function listTools(serviceType: string): unknown[] {
     return [
       {
         name: 'video_generation',
-        description: '文生视频（根据描述生成视频，支持 doubao-seedance-2.0），模型由参数 model 指定',
+        description: '文生/参考内容生视频（支持参考图、首帧可选尾帧、公网参考视频和音频 URL），模型由参数 model 指定',
         inputSchema: {
           type: 'object',
           properties: {
             prompt: { type: 'string', description: '视频描述（必填）' },
+            content: VIDEO_CONTENT_SCHEMA,
+            metadata: {
+              type: 'object',
+              properties: { content: VIDEO_CONTENT_SCHEMA },
+              additionalProperties: false,
+              description: '兼容上游请求写法：metadata.content 与顶层 content 等价，二者只能选一'
+            },
             model: {
               type: 'string',
               enum: BUILTIN_MCP_VIDEO_DEFAULTS.models,
@@ -1471,30 +1614,11 @@ function listTools(serviceType: string): unknown[] {
       },
       {
         name: 'video_from_image',
-        description: '图生视频（基于输入图片生成视频，支持 doubao-seedance-2.0），模型由参数 model 指定',
+        description: '参考内容生视频（支持参考图、首帧可选尾帧、公网参考视频和音频 URL），模型由参数 model 指定',
         inputSchema: {
           type: 'object',
           properties: {
-            content: {
-              type: 'array',
-              items: {
-                type: 'object',
-                properties: {
-                  type: { type: 'string', enum: ['text', 'image_url'], description: '内容类型：text（提示文本）或 image_url（图片）' },
-                  text: { type: 'string', description: '文本内容（type=text 时必填）' },
-                  image_url: {
-                    type: 'object',
-                    properties: {
-                      url: { type: 'string', description: '图片 URL（type=image_url 时必填）' }
-                    },
-                    required: ['url']
-                  },
-                  role: { type: 'string', enum: ['reference_image', 'first_frame', 'last_frame'], description: '图片角色：reference_image（参考图）/ first_frame（首帧）/ last_frame（尾帧）' }
-                },
-                required: ['type']
-              },
-              description: '图片内容数组（必填）：支持参考图模式（role=reference_image，可多张）和首尾帧模式（role=first_frame+last_frame，各一张），两种模式不能混用'
-            },
+            content: VIDEO_CONTENT_SCHEMA,
             prompt: { type: 'string', description: '视频描述（必填，与 content 中 text 项互补）' },
             model: {
               type: 'string',
@@ -1532,10 +1656,6 @@ function listTools(serviceType: string): unknown[] {
               type: 'boolean',
               description: '是否添加水印，默认 false'
             },
-            reference_video: {
-              type: 'string',
-              description: '参考视频（可选）：Base64 编码，用于风格迁移'
-            }
           },
           required: ['content', 'prompt']
         }
