@@ -56,7 +56,7 @@ function trayIcon(): Electron.NativeImage {
 export function createTray(getMainWindow: () => BrowserWindow | null): Tray {
   const icon = trayIcon()
   tray = new Tray(icon)
-  tray.setToolTip('大算头适配器')
+  tray.setToolTip('dst adapter')
   if (icon.isEmpty()) {
     console.warn('[tray] icon is empty, tray may be invisible')
   }

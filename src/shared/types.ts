@@ -230,6 +230,8 @@ export interface AppSettings {
   launchAtLogin: boolean
   backupKeep: number
   locale: 'zh-CN'
+  /** Custom WorkBuddy install directory or executable path. */
+  workBuddyPath: string
   providerName: string
   providerEndpoint: string
   providerApiKey: string
@@ -241,6 +243,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   launchAtLogin: false,
   backupKeep: 10,
   locale: 'zh-CN',
+  workBuddyPath: '',
   providerName: 'dst',
   providerEndpoint: DEFAULT_PROVIDER_ENDPOINT,
   providerApiKey: '',

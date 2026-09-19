@@ -2,7 +2,7 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import { shell } from 'electron'
-import { execFile } from 'child_process'
+import { execFile, execFileSync, spawn } from 'child_process'
 import { promisify } from 'util'
 import type {
   ApplyResult,
@@ -12,7 +12,7 @@ import type {
   SkillCatalogResult
 } from '../../shared/types'
 import { providerToWorkBuddyModel } from '../../shared/url'
-import { atomicWriteText, backupFile } from '../store'
+import { atomicWriteText, backupFile, getSettings } from '../store'
 import { installSkillPackage } from '../skills/installer'
 import { downloadSkillPackage, fetchSkillCatalog } from '../skills/catalog'
 import { compareVersions } from '../skills/version'
@@ -23,6 +23,11 @@ import type {
 
 type WorkBuddyModel = ReturnType<typeof providerToWorkBuddyModel>
 const execFileAsync = promisify(execFile)
+const windowsUninstallRegistryRoots = [
+  'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+  'HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+  'HKLM\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall'
+]
 
 function homeWorkbuddyDir(): string {
   return path.join(os.homedir(), '.workbuddy')
@@ -81,6 +86,17 @@ async function isWorkBuddyRunning(): Promise<boolean> {
 
 function findInstallDirs(): string[] {
   const dirs: string[] = []
+  const customPath = getSettings().workBuddyPath?.trim()
+  if (customPath) {
+    // Accept either the install directory or the WorkBuddy executable. Both
+    // forms use the executable's directory for resources/install-manifest.json.
+    dirs.push(
+      path.extname(customPath).toLowerCase() === '.exe'
+        ? path.dirname(path.resolve(customPath))
+      : path.resolve(customPath)
+    )
+  }
+  dirs.push(...findRegistryInstallDirs())
   const local = process.env.LOCALAPPDATA
   if (local) {
     dirs.push(path.join(local, 'Programs', 'WorkBuddy'))
@@ -89,7 +105,58 @@ function findInstallDirs(): string[] {
   if (process.platform === 'darwin') {
     dirs.push('/Applications/WorkBuddy.app')
   }
-  return dirs
+  return [...new Set(dirs)]
+}
+
+function registryValueToInstallDir(value: string): string | undefined {
+  const data = value.trim()
+  if (!data || !/workbuddy/i.test(data)) return undefined
+
+  const quoted = /^"([^"]+)"/.exec(data)
+  let target = quoted?.[1] || data
+  target = target.replace(/,\d+$/, '').trim()
+  if (!target) return undefined
+
+  try {
+    const base = path.basename(target).toLowerCase()
+    if (base === 'workbuddy.exe') return path.dirname(path.resolve(target))
+    if (base === 'uninstall workbuddy.exe') {
+      return path.dirname(path.resolve(target))
+    }
+    if (!path.extname(target)) return path.resolve(target)
+  } catch {
+    return undefined
+  }
+  return undefined
+}
+
+function findRegistryInstallDirs(): string[] {
+  if (process.platform !== 'win32') return []
+
+  const dirs: string[] = []
+  for (const root of windowsUninstallRegistryRoots) {
+    let output: string
+    try {
+      output = execFileSync(
+        'cmd.exe',
+        ['/d', '/c', `chcp 65001>nul & reg.exe query ${root} /s /f WorkBuddy /d`],
+        { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }
+      )
+    } catch {
+      // A missing registry root or an empty search result is not fatal.
+      continue
+    }
+
+    for (const line of output.split(/\r?\n/)) {
+      const match = /^\s*(DisplayIcon|InstallLocation|QuietUninstallString|UninstallString)\s+REG_\w+\s+(.+)$/i.exec(line)
+      const dir = match && registryValueToInstallDir(match[2])
+      if (!dir) continue
+      // Registry data can point at a stale location. Only accept directories
+      // that still contain the executable used by launch and version checks.
+      if (fs.existsSync(path.join(dir, 'WorkBuddy.exe'))) dirs.push(dir)
+    }
+  }
+  return [...new Set(dirs)]
 }
 
 function parseModels(raw: string): WorkBuddyModel[] {
@@ -202,10 +269,47 @@ async function writeMcp(
   }
 }
 
+function workBuddyChildEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env }
+  for (const key of Object.keys(env)) {
+    const name = key.toLowerCase()
+    if (
+      name === 'electron_renderer_url' ||
+      name === 'vite_dev_server_url' ||
+      name === 'node_env'
+    ) {
+      delete env[key]
+    }
+  }
+  return env
+}
+
+function startWorkBuddyExecutable(exe: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(exe, [], {
+      cwd: path.dirname(exe),
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: false,
+      env: workBuddyChildEnv()
+    })
+    child.once('error', reject)
+    child.once('spawn', () => {
+      child.unref()
+      resolve()
+    })
+  })
+}
+
 async function launch(): Promise<void> {
   if (process.platform === 'darwin') {
-    await shell.openPath('/Applications/WorkBuddy.app')
-    return
+    for (const dir of findInstallDirs()) {
+      if (fs.existsSync(dir)) {
+        await shell.openPath(dir)
+        return
+      }
+    }
+    throw new Error('未找到 WorkBuddy 应用')
   }
   const candidates = [
     ...findInstallDirs().map((d) => path.join(d, 'WorkBuddy.exe')),
@@ -222,11 +326,20 @@ async function launch(): Promise<void> {
   ]
   for (const exe of candidates) {
     if (fs.existsSync(exe)) {
-      await shell.openPath(exe)
+      // Electron dev servers inject renderer URLs into child Electron apps.
+      // WorkBuddy treats ELECTRON_RENDERER_URL as its own dev entry, so it must
+      // not inherit dstAdapter's Vite URL or it opens this adapter as a blank
+      // WorkBuddy window.
+      await startWorkBuddyExecutable(exe)
       return
     }
   }
-  throw new Error('未找到 WorkBuddy 可执行文件')
+  const customPath = getSettings().workBuddyPath?.trim()
+  throw new Error(
+    customPath
+      ? `未找到 WorkBuddy 可执行文件；请检查设置中的自定义路径：${customPath}`
+      : '未找到 WorkBuddy 可执行文件；可在设置中填写自定义安装目录'
+  )
 }
 
 async function listSkills(force = false) {
@@ -355,7 +468,11 @@ async function updateSkill(
 
   if (skill.minWorkBuddyVersion) {
     const appVersion = workBuddyAppVersion()
-    if (!appVersion) throw new Error(`无法确认 WorkBuddy 版本；Skill 要求最低 v${skill.minWorkBuddyVersion}`)
+    if (!appVersion) {
+      throw new Error(
+        `无法确认 WorkBuddy 版本；请检查设置中的 WorkBuddy 路径及 resources/install-manifest.json。Skill 要求最低 v${skill.minWorkBuddyVersion}`
+      )
+    }
     if (compareVersions(appVersion, skill.minWorkBuddyVersion) < 0) {
       throw new Error(`WorkBuddy v${appVersion} 低于 Skill 要求的 v${skill.minWorkBuddyVersion}`)
     }

@@ -1,4 +1,4 @@
-﻿# 生成 大算头适配器 图标资源 (PowerShell 薄壳 + C# 绘制内核, 规避 PS GDI+ 方法绑定坑)
+﻿# 生成 dst adapter 图标资源 (PowerShell 薄壳 + C# 绘制内核, 规避 PS GDI+ 方法绑定坑)
 # 输出:
 #   resources/icon.png  512x512  窗口图标(圆角方块+科技蓝渐变+适配LOGO)
 #   resources/icon.ico  16/24/32/48/64/128/256  多尺寸 Windows 图标(exe/任务栏)

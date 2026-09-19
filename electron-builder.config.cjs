@@ -25,7 +25,7 @@ const publish = ossUpdateBaseUrl
 
 module.exports = {
   appId: 'com.dasuantou.adapter',
-  productName: '大算头适配器',
+  productName: 'dst adapter',
   directories: {
     output: 'release'
   },
@@ -59,14 +59,15 @@ module.exports = {
   nsis: {
     artifactName: '${name}-setup-${version}.${ext}',
     oneClick: false,
-    allowToChangeInstallationDirectory: true
+    allowToChangeInstallationDirectory: true,
+    include: 'build/installer.nsh'
   },
   portable: {
     artifactName: '${name}-${version}-portable.${ext}'
   },
   protocols: [
     {
-      name: '大算头适配器',
+      name: 'dst adapter',
       schemes: ['dstadapter']
     }
   ],

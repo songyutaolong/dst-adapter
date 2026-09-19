@@ -112,7 +112,7 @@ function buildModelCatalog(provider: Provider): unknown {
       {
         slug,
         display_name: displayName,
-        description: `${displayName}（通过大算头适配器）`,
+        description: `${displayName}（通过 dst adapter）`,
         default_reasoning_level: 'medium',
         supported_reasoning_levels: [
           { effort: 'low', description: '快速' },

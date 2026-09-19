@@ -61,7 +61,7 @@ function createWindow(): void {
     minWidth: 800,
     minHeight: 560,
     show: false,
-    title: `大算头适配器 v${app.getVersion()}`,
+    title: `dst adapter v${app.getVersion()}`,
     ...(icon ? { icon } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),

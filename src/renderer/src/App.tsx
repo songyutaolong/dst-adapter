@@ -89,6 +89,7 @@ export default function App() {
   const [settings, setSettings] = useState<AppSettings | null>(null)
   const [showSettings, setShowSettings] = useState(false)
   const [form, setForm] = useState<FormState>(emptyForm())
+  const [workBuddyPath, setWorkBuddyPath] = useState('')
   const [busy, setBusy] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [toast, setToast] = useState<{
@@ -272,6 +273,7 @@ export default function App() {
   const loadSettingsForm = useCallback((appSettings: AppSettings | null, providerList: Provider[]) => {
     const existing = providerList[0]
     const apiKey = appSettings?.providerApiKey || existing?.apiKey || ''
+    setWorkBuddyPath(appSettings?.workBuddyPath || '')
     setForm({
       name: appSettings?.providerName || existing?.name || 'dst',
       endpoint: appSettings?.providerEndpoint || existing?.endpoint || DEFAULT_PROVIDER_ENDPOINT,
@@ -386,6 +388,22 @@ export default function App() {
       showToast(err instanceof Error ? err.message : String(err), true)
     } finally {
       setSyncing(false)
+    }
+  }
+
+  const saveWorkBuddyPath = async () => {
+    setBusy(true)
+    try {
+      const next = await window.dst.updateSettings({
+        workBuddyPath: workBuddyPath.trim()
+      })
+      setSettings(next)
+      showToast(next.workBuddyPath ? 'WorkBuddy 路径已保存' : '已恢复默认 WorkBuddy 路径')
+      await refresh()
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), true)
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -755,6 +773,34 @@ export default function App() {
                       )}
                     </div>
                   )}
+                </section>
+
+                <section className="settings-section">
+                  <h3>WorkBuddy 路径</h3>
+                  <p className="settings-desc">
+                    留空时会自动检测默认目录和系统安装记录；自动检测失败时，再填写安装目录或 WorkBuddy.exe 完整路径。
+                  </p>
+                  <div className="form">
+                    <div className="field">
+                      <label>安装目录 / 可执行文件</label>
+                      <input
+                        type="text"
+                        value={workBuddyPath}
+                        spellCheck={false}
+                        placeholder="例如 D:\Apps\WorkBuddy 或 D:\Apps\WorkBuddy\WorkBuddy.exe"
+                        onChange={(e) => setWorkBuddyPath(e.target.value)}
+                      />
+                    </div>
+                    <div className="actions settings-actions">
+                      <button
+                        className="btn primary settings-btn"
+                        disabled={busy}
+                        onClick={saveWorkBuddyPath}
+                      >
+                        保存路径
+                      </button>
+                    </div>
+                  </div>
                 </section>
 
                 <section className="settings-section">
@@ -1322,7 +1368,7 @@ export default function App() {
           )}
 
           <p className="footer-note">
-            大算头适配器 v{version || '…'} · 本地数据目录：{dataDir || '...'}
+            dst adapter v{version || '…'} · 本地数据目录：{dataDir || '...'}
             （备份在 backups/ 下）
           </p>
         </main>

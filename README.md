@@ -1,4 +1,4 @@
-# 大算头适配器
+# dst adapter
 
 跨平台桌面托盘应用：用 **CC Switch 模式**管理多个 AI 服务商（Provider），一键启用并写入本机客户端配置。
 
