@@ -12,7 +12,7 @@ import type {
   SkillCatalogResult
 } from '../../shared/types'
 import { providerToWorkBuddyModel } from '../../shared/url'
-import { atomicWriteText, backupFile, getSettings } from '../store'
+import { atomicWriteText, backupFile, backupsDir, getSettings } from '../store'
 import { installSkillPackage } from '../skills/installer'
 import { downloadSkillPackage, fetchSkillCatalog } from '../skills/catalog'
 import { compareVersions } from '../skills/version'
@@ -501,7 +501,8 @@ async function updateSkill(
       targetDir,
       remote: skill,
       data,
-      previousVersion: local?.version
+      previousVersion: local?.version,
+      backupRoot: backupsDir('workbuddy-skills')
     })
     return result
   } catch (err) {

@@ -16,9 +16,21 @@ import { stopCodexProxy } from './codex/proxy'
 import { launchMcpService, getMcpRuntime } from './mcp/launcher'
 import { initUpdater } from './update'
 import { applyLaunchAtLogin } from './login'
+import { migrateLegacySkillWorkDirectories } from './skills/maintenance'
 
 let mainWindow: BrowserWindow | null = null
 let pendingDeepLink: string | null = null
+
+async function maintainWorkBuddySkills(): Promise<void> {
+  try {
+    await migrateLegacySkillWorkDirectories({
+      skillsRoot: join(app.getPath('home'), '.workbuddy', 'skills'),
+      backupRoot: join(app.getPath('home'), '.dst-adapter', 'backups', 'workbuddy-skills')
+    })
+  } catch (err) {
+    console.error('[Skills] WorkBuddy 历史目录迁移失败', err)
+  }
+}
 
 const gotLock = app.requestSingleInstanceLock()
 if (!gotLock) {
@@ -121,6 +133,7 @@ function handleDeepLink(url: string): void {
 
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(null)
+  await maintainWorkBuddySkills()
 
   if (process.defaultApp) {
     if (process.argv.length >= 2) {

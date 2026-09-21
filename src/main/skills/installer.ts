@@ -5,6 +5,7 @@ import yauzl from 'yauzl'
 import type { RemoteSkillPackage } from '../../shared/types'
 import type { ApplyResult } from '../../shared/types'
 import { compareVersions } from './version'
+import { migrateLegacySkillWorkDirectories } from './maintenance'
 
 const MAX_ARCHIVE_ENTRIES = 10000
 const MAX_EXTRACTED_SIZE = 400 * 1024 * 1024
@@ -173,14 +174,18 @@ export async function installSkillPackage(options: {
   remote: RemoteSkillPackage
   data: Buffer
   previousVersion?: string
+  backupRoot: string
 }): Promise<ApplyResult> {
   const { skillsRoot, remote, data, previousVersion } = options
   const root = path.resolve(skillsRoot)
   const target = path.resolve(options.targetDir)
+  const backupRoot = path.resolve(options.backupRoot)
   assertInsideRoot(root, target)
 
   await fs.mkdir(root, { recursive: true })
-  const stagingRoot = path.join(root, '.dst-staging')
+  await migrateLegacySkillWorkDirectories({ skillsRoot: root, backupRoot })
+
+  const stagingRoot = path.join(backupRoot, '.staging')
   await fs.mkdir(stagingRoot, { recursive: true })
   const stage = await fs.mkdtemp(path.join(stagingRoot, `${remote.id}-`))
 
@@ -204,7 +209,7 @@ export async function installSkillPackage(options: {
     await fs.mkdir(path.dirname(target), { recursive: true })
     const hadPrevious = existsSync(target)
     const backupTarget = hadPrevious
-      ? path.join(root, '.dst-backup', `${remote.id}-${Date.now()}`)
+      ? path.join(backupRoot, `${remote.id}-${Date.now()}`)
       : undefined
     if (backupTarget) await fs.mkdir(path.dirname(backupTarget), { recursive: true })
 
