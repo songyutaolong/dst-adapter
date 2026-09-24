@@ -220,6 +220,9 @@ async function uploadMultipart(fileName, objectKey, body, contentType, cacheCont
       body: completeBody,
       contentType: 'application/xml; charset=utf-8'
     })
+    await ossRequest('PUT', objectKey, [{ key: 'acl', value: '' }], {
+      publicRead: true
+    })
     console.log(`Uploaded ${fileName} (${body.length} bytes, ${cacheControl}, multipart)`)
   } catch (err) {
     await ossRequest('DELETE', objectKey, [{ key: 'uploadId', value: uploadId }], {}).catch(() => undefined)
