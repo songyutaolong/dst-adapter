@@ -662,15 +662,12 @@ export default function App() {
     }
   }
 
-  const onUemcpStart = async (s: McpService) => {
+  const onUemcpEnable = async (s: McpService) => {
     setBusy(true)
     try {
       const result = await window.dst.enableMcpService(s.id, true, 'workbuddy')
       showToast(result.message, !result.ok)
-      if (!result.ok) return
-
-      const launchResult = await window.dst.launchApp('workbuddy')
-      showToast(launchResult?.message || '已启动 WorkBuddy')
+      await refresh()
     } catch (err) {
       showToast(err instanceof Error ? err.message : String(err), true)
     } finally {
@@ -1003,9 +1000,9 @@ export default function App() {
                                 <button
                                   className="btn primary settings-btn"
                                   disabled={busy}
-                                  onClick={() => onUemcpStart(s)}
+                                  onClick={() => onUemcpEnable(s)}
                                 >
-                                  启动 WorkBuddy
+                                  启用配置
                                 </button>
                               </div>
                             ) : (
@@ -1316,12 +1313,10 @@ export default function App() {
                               className="btn primary"
                               disabled={busy}
                               onClick={() =>
-                                s.type === 'ue-mcp'
-                                  ? onUemcpStart(s)
-                                  : onMcpEnable(s, true)
+                                onUemcpEnable(s)
                               }
                             >
-                              {s.type === 'ue-mcp' ? '启动' : '启用'}
+                              启用
                             </button>
                             <button
                               className="btn danger"
