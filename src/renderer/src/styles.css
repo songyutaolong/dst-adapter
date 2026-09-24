@@ -603,6 +603,52 @@ textarea {
   white-space: nowrap;
 }
 
+.api-key-control {
+  position: relative;
+  display: flex;
+}
+
+.api-key-control input {
+  width: 100%;
+  min-width: 0;
+  padding-right: 48px;
+  font-variant-numeric: tabular-nums;
+}
+
+.api-key-toggle {
+  position: absolute;
+  top: 50%;
+  right: 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+  transform: translateY(-50%);
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.api-key-toggle:hover:not(:disabled) {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.api-key-toggle:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.api-key-toggle svg {
+  width: 18px;
+  height: 18px;
+}
+
 .model-picker {
   margin-top: 4px;
   border: 1px solid var(--border);
