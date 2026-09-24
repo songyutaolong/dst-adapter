@@ -1,6 +1,10 @@
 import { app, ipcMain, BrowserWindow, shell, clipboard } from 'electron'
 import type { AppId, Provider, McpService, ModelConfig, ModelInfo, SyncModelsResult } from '../shared/types'
-import { APP_META, DEFAULT_PROVIDER_ENDPOINT } from '../shared/types'
+import {
+  APP_META,
+  BUILTIN_MCP_UEMCP_ID,
+  DEFAULT_PROVIDER_ENDPOINT
+} from '../shared/types'
 import { listAdapters, getAdapter } from './adapters'
 import {
   createProvider,
@@ -26,7 +30,12 @@ import {
   saveModelsFromApi,
   getLastSyncAt
 } from './store'
-import { enableProvider, enableModel as enableModelForApp, applyMcpToApp } from './switcher'
+import {
+  enableProvider,
+  enableModel as enableModelForApp,
+  applyMcpToApp,
+  ensureMcpToApp
+} from './switcher'
 import { fetchModels, speedTest } from './speedtest'
 import { rebuildTrayMenu } from './tray'
 import { parseDeepLink } from '../shared/url'
@@ -116,6 +125,13 @@ export function registerIpc(getMainWindow: () => BrowserWindow | null): void {
   ipcMain.handle('adapters:launch', async (_e, app: AppId) => {
     const adapter = getAdapter(app)
     if (!adapter.launch) throw new Error('该应用不支持启动')
+    if (app === 'workbuddy') {
+      const service = getMcpService(BUILTIN_MCP_UEMCP_ID)
+      if (service?.enabledApps?.includes(app)) {
+        const result = await ensureMcpToApp(app, service.id)
+        if (!result.ok) throw new Error(result.message)
+      }
+    }
     const result = await adapter.launch()
     if (result && typeof result === 'object') return result
     return { ok: true, message: '已尝试启动应用' }
@@ -177,12 +193,15 @@ export function registerIpc(getMainWindow: () => BrowserWindow | null): void {
   })
 
   ipcMain.handle('mcp:enable', async (_e, id: string, enabled: boolean, app: AppId) => {
-    return applyMcpToApp(app, id, enabled)
+    return enabled ? ensureMcpToApp(app, id) : applyMcpToApp(app, id, false)
   })
 
   ipcMain.handle('mcp:start', async (_e, id: string, app?: AppId) => {
     const service = getMcpService(id)
     if (!service) throw new Error('MCP Service not found')
+    if (service.type === 'ue-mcp') {
+      throw new Error('UEMCP 由 WorkBuddy 启动；请先启用配置，再启动 WorkBuddy')
+    }
     const conn = getDstConnection()
     const provider = app ? listProviders(app)[0] : undefined
     const endpoint = conn.apiKey ? conn.endpoint : provider?.endpoint

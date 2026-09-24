@@ -5,7 +5,19 @@ import type {
   SkillCatalogResult
 } from '../../shared/types'
 
-export type McpServerEntry = { type: string; url: string; name?: string }
+export type HttpMcpServerEntry = {
+  type: 'http'
+  url: string
+  name?: string
+}
+
+export type CommandMcpServerEntry = {
+  command: string
+  args?: string[]
+  disabled?: boolean
+}
+
+export type McpServerEntry = HttpMcpServerEntry | CommandMcpServerEntry
 
 export interface AppAdapter {
   id: string
@@ -19,6 +31,8 @@ export interface AppAdapter {
     merge: Record<string, McpServerEntry>,
     removeKeys?: string[]
   ): Promise<ApplyResult>
+  /** 读取目标应用当前已存在的 MCP 配置 */
+  readMcp?(): Promise<Record<string, McpServerEntry>>
   /** 拉取目标应用可用的远端 Skill 目录 */
   listSkills?(force?: boolean): Promise<SkillCatalogResult>
   /** 更新已安装 Skill 的模型调用开关 */

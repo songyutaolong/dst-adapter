@@ -14,8 +14,11 @@ import {
   BUILTIN_MCP_FILE_UPLOAD_ID,
   BUILTIN_MCP_FILE_UPLOAD_DEFAULTS,
   BUILTIN_MCP_3D_ID,
-  BUILTIN_MCP_3D_DEFAULTS
+  BUILTIN_MCP_3D_DEFAULTS,
+  BUILTIN_MCP_UEMCP_ID,
+  BUILTIN_MCP_UEMCP_DEFAULTS
 } from '../shared/types'
+import type { HttpMcpServerEntry, McpServerEntry } from './adapters/types'
 import { getMcpRuntime, getPortForService } from './mcp/launcher'
 
 export interface DataStore {
@@ -478,6 +481,26 @@ function builtinMcp3DService(): McpService {
   }
 }
 
+/** 内置 UEMCP 服务模板；配置写入 WorkBuddy 后由 WorkBuddy 拉起。 */
+function builtinMcpUemcpService(): McpService {
+  const now = new Date().toISOString()
+  return {
+    id: BUILTIN_MCP_UEMCP_ID,
+    name: BUILTIN_MCP_UEMCP_DEFAULTS.name,
+    type: BUILTIN_MCP_UEMCP_DEFAULTS.type,
+    provider: BUILTIN_MCP_UEMCP_DEFAULTS.provider,
+    baseUrl: '',
+    modelId: '',
+    apiKey: '',
+    enabledApps: ['workbuddy'],
+    enabled: true,
+    running: false,
+    builtin: true,
+    createdAt: now,
+    updatedAt: now
+  }
+}
+
 export function listMcpServices(): McpService[] {
   const store = loadStore()
   let changed = false
@@ -553,6 +576,17 @@ export function listMcpServices(): McpService[] {
     // 3D 模型已在平台侧归拢，内置服务不再保留本机默认模型。
     builtin3D.modelId = ''
     builtin3D.updatedAt = new Date().toISOString()
+    changed = true
+  }
+
+  // 确保 UEMCP 服务存在，并默认接入 WorkBuddy。
+  const builtinUemcp = store.mcpServices.find((s) => s.id === BUILTIN_MCP_UEMCP_ID)
+  if (!builtinUemcp) {
+    store.mcpServices.push(builtinMcpUemcpService())
+    changed = true
+  } else if (builtinUemcp.name !== BUILTIN_MCP_UEMCP_DEFAULTS.name) {
+    builtinUemcp.name = BUILTIN_MCP_UEMCP_DEFAULTS.name
+    builtinUemcp.updatedAt = new Date().toISOString()
     changed = true
   }
 
@@ -663,11 +697,23 @@ export function markMcpServiceRunning(id: string, running: boolean, port?: numbe
 /** 生成 MCP 服务连接信息（固定端口，不要求当前已在运行）。 */
 export function getMcpConnectionInfo(id: string): {
   text: string
-  json: Record<string, unknown>
+  json: McpServerEntry
   key: string
 } {
   const service = getMcpService(id)
   if (!service) throw new Error('MCP Service not found')
+  if (service.id === BUILTIN_MCP_UEMCP_ID) {
+    const json = {
+      command: BUILTIN_MCP_UEMCP_DEFAULTS.command,
+      args: [...BUILTIN_MCP_UEMCP_DEFAULTS.args],
+      disabled: false
+    }
+    return {
+      json,
+      key: 'ue-mcp',
+      text: JSON.stringify({ mcpServers: { 'ue-mcp': json } }, null, 2)
+    }
+  }
   const runtime = getMcpRuntime(id)
   const port = runtime.port || getPortForService(id)
   const localUrl = `http://127.0.0.1:${port}`
@@ -680,7 +726,7 @@ export function getMcpConnectionInfo(id: string): {
   } else {
     key = service.id
   }
-  const json = {
+  const json: HttpMcpServerEntry = {
     type: 'http',
     url: localUrl,
     name: service.name

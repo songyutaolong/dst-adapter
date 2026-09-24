@@ -15,6 +15,7 @@ import type {
 } from '../../shared/types'
 import {
   BUILTIN_MCP_IMAGE_DEFAULTS,
+  BUILTIN_MCP_UEMCP_DEFAULTS,
   BUILTIN_MCP_VIDEO_DEFAULTS,
   DEFAULT_PROVIDER_ENDPOINT
 } from '../../shared/types'
@@ -77,6 +78,31 @@ const emptyForm = (): FormState => ({
 
 function isMcpEnabledForApp(service: McpService, app: AppId): boolean {
   return Boolean(service.enabledApps?.includes(app))
+}
+
+function mcpProviderLabel(service: McpService): string {
+  if (service.type === 'ue-mcp') return '大算头'
+  if (service.provider === 'dst') return '大算头'
+  if (service.provider === 'gemini-3-pro-image') return 'Gemini 3 Pro Image'
+  if (service.provider === 'gpt-image-2') return 'GPT Image 2'
+  if (service.provider === 'doubao-seedance-2.0') return '豆包 Seedance 2.0'
+  return '自定义'
+}
+
+function mcpCapability(service: McpService): string {
+  if (service.type === 'ue-mcp') {
+    return `启动命令：${BUILTIN_MCP_UEMCP_DEFAULTS.command} ${BUILTIN_MCP_UEMCP_DEFAULTS.args.join(' ')}（由 WorkBuddy 自动拉起）`
+  }
+  if (service.type === 'file-upload') {
+    return '支持输入：腾讯 COS / 阿里 OSS；本地路径 / Base64 文件（file_path / content 二选一）'
+  }
+  if (service.type === '3d-generation') {
+    return '支持任务：文生 / 图生 / 多视图 / 任务查询（统一模型）'
+  }
+  if (service.type === 'video-generation') {
+    return `支持模型：${BUILTIN_MCP_VIDEO_DEFAULTS.models.join(' / ')}（请求时按参数选择）`
+  }
+  return `支持模型：${BUILTIN_MCP_IMAGE_DEFAULTS.models.join(' / ')}（请求时按参数选择）`
 }
 
 export default function App() {
@@ -598,6 +624,22 @@ export default function App() {
     }
   }
 
+  const onUemcpStart = async (s: McpService) => {
+    setBusy(true)
+    try {
+      const result = await window.dst.enableMcpService(s.id, true, 'workbuddy')
+      showToast(result.message, !result.ok)
+      if (!result.ok) return
+
+      const launchResult = await window.dst.launchApp('workbuddy')
+      showToast(launchResult?.message || '已启动 WorkBuddy')
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const builtinMcpServices = useMemo(
     () => mcpServices.filter((s) => s.builtin),
     [mcpServices]
@@ -605,10 +647,12 @@ export default function App() {
 
   const currentAppMcpServices = useMemo(
     () =>
-      builtinMcpServices.map((service) => ({
-        ...service,
-        enabledForCurrentApp: isMcpEnabledForApp(service, currentApp)
-      })),
+      builtinMcpServices
+        .filter((service) => service.type !== 'ue-mcp' || currentApp === 'workbuddy')
+        .map((service) => ({
+          ...service,
+          enabledForCurrentApp: isMcpEnabledForApp(service, currentApp)
+        })),
     [builtinMcpServices, currentApp]
   )
 
@@ -888,29 +932,47 @@ export default function App() {
                           <div>
                             <h4>
                               {s.name}
-                              <span className="badge builtin">内置</span>
-                              {s.running ? (
-                                <span className="badge ok">运行中 :{s.port}</span>
+                              {s.type === 'ue-mcp' ? (
+                                <span className="badge builtin">外部进程</span>
                               ) : (
-                                <span className="badge">未运行</span>
+                                <>
+                                  <span className="badge builtin">内置</span>
+                                  {s.running ? (
+                                    <span className="badge ok">运行中 :{s.port}</span>
+                                  ) : (
+                                    <span className="badge">未运行</span>
+                                  )}
+                                </>
                               )}
                             </h4>
-                            <div className="row settings-actions">
-                              <button
-                                className="btn primary settings-btn"
-                                disabled={busy}
-                                onClick={() => onMcpStart(s)}
-                              >
-                                启动服务
-                              </button>
-                              <button
-                                className="btn danger settings-btn"
-                                disabled={busy}
-                                onClick={() => onMcpStop(s)}
-                              >
-                                停止服务
-                              </button>
-                            </div>
+                            {s.type === 'ue-mcp' ? (
+                              <div className="row settings-actions">
+                                <button
+                                  className="btn primary settings-btn"
+                                  disabled={busy}
+                                  onClick={() => onUemcpStart(s)}
+                                >
+                                  启动 WorkBuddy
+                                </button>
+                              </div>
+                            ) : (
+                              <div className="row settings-actions">
+                                <button
+                                  className="btn primary settings-btn"
+                                  disabled={busy}
+                                  onClick={() => onMcpStart(s)}
+                                >
+                                  启动服务
+                                </button>
+                                <button
+                                  className="btn danger settings-btn"
+                                  disabled={busy}
+                                  onClick={() => onMcpStop(s)}
+                                >
+                                  停止服务
+                                </button>
+                              </div>
+                            )}
                           </div>
                         </div>
                       ))}
@@ -1191,43 +1253,22 @@ export default function App() {
                             )}
                           </h4>
                           <div className="sub">
-                            服务商：
-                            {s.provider === 'dst'
-                              ? '大算头'
-                              : s.provider === 'gemini-3-pro-image'
-                                ? 'Gemini 3 Pro Image'
-                                : s.provider === 'gpt-image-2'
-                                  ? 'GPT Image 2'
-                                  : s.provider === 'doubao-seedance-2.0'
-                                    ? '豆包 Seedance 2.0'
-                                    : '自定义'}
+                            服务商：{mcpProviderLabel(s)}
                           </div>
                           <div className="sub">
-                            {s.type === 'file-upload'
-                              ? '支持输入：'
-                              : s.type === '3d-generation'
-                                ? '支持任务：'
-                                : '支持模型：'}
-                            {s.type === 'video-generation'
-                              ? BUILTIN_MCP_VIDEO_DEFAULTS.models.join(' / ')
-                              : s.type === 'file-upload'
-                                ? '腾讯 COS / 阿里 OSS；本地路径 / Base64 文件'
-                                : s.type === '3d-generation'
-                                  ? '文生 / 图生 / 多视图 / 任务查询'
-                                  : BUILTIN_MCP_IMAGE_DEFAULTS.models.join(' / ')}
-                            {s.type === 'file-upload'
-                              ? '（file_path / content 二选一）'
-                              : s.type === '3d-generation'
-                                ? '（统一模型）'
-                                : '（请求时按参数选择）'}
+                            {mcpCapability(s)}
                           </div>
                           <div className="row mcp-actions">
                             <button
                               className="btn primary"
                               disabled={busy}
-                              onClick={() => onMcpEnable(s, true)}
+                              onClick={() =>
+                                s.type === 'ue-mcp'
+                                  ? onUemcpStart(s)
+                                  : onMcpEnable(s, true)
+                              }
                             >
-                              启用
+                              {s.type === 'ue-mcp' ? '启动' : '启用'}
                             </button>
                             <button
                               className="btn danger"

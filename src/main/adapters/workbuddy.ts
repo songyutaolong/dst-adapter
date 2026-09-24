@@ -237,26 +237,14 @@ async function writeMcp(
   }
 
   const backupPath = backupFile('workbuddy', file)
-  let servers: Record<string, McpServerEntry> = {}
-  if (fs.existsSync(file)) {
-    try {
-      const parsed = JSON.parse(fs.readFileSync(file, 'utf-8')) as {
-        mcpServers?: Record<string, McpServerEntry>
-      }
-      if (parsed && parsed.mcpServers && typeof parsed.mcpServers === 'object') {
-        servers = { ...parsed.mcpServers }
-      }
-    } catch {
-      servers = {}
-    }
-  }
+  const servers = await readMcp()
+  const nextServers = { ...servers, ...merge }
 
-  servers = { ...servers, ...merge }
   for (const key of removeKeys) {
-    delete servers[key]
+    delete nextServers[key]
   }
 
-  atomicWriteText(file, `${JSON.stringify({ mcpServers: servers }, null, 2)}\n`)
+  atomicWriteText(file, `${JSON.stringify({ mcpServers: nextServers }, null, 2)}\n`)
   const merged = Object.keys(merge)
   const removed = removeKeys.filter((k) => !merged.includes(k))
   return {
@@ -267,6 +255,23 @@ async function writeMcp(
         : `已合并 MCP 配置到 WorkBuddy mcp.json（${merged.join(', ') || '无'}）`,
     backupPath
   }
+}
+
+async function readMcp(): Promise<Record<string, McpServerEntry>> {
+  const file = mcpPath()
+  if (!fs.existsSync(file)) return {}
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf-8')) as {
+      mcpServers?: Record<string, McpServerEntry>
+    }
+    if (parsed && parsed.mcpServers && typeof parsed.mcpServers === 'object') {
+      return { ...parsed.mcpServers }
+    }
+  } catch {
+    return {}
+  }
+  return {}
 }
 
 function workBuddyChildEnv(): NodeJS.ProcessEnv {
@@ -521,6 +526,7 @@ export const workbuddyAdapter: AppAdapter = {
   readLive,
   writeLive,
   writeMcp,
+  readMcp,
   listSkills,
   setSkillEnabled,
   updateSkill,

@@ -17,6 +17,8 @@ import { launchMcpService, getMcpRuntime } from './mcp/launcher'
 import { initUpdater } from './update'
 import { applyLaunchAtLogin } from './login'
 import { migrateLegacySkillWorkDirectories } from './skills/maintenance'
+import { ensureMcpToApp } from './switcher'
+import { BUILTIN_MCP_UEMCP_ID } from '../shared/types'
 
 let mainWindow: BrowserWindow | null = null
 let pendingDeepLink: string | null = null
@@ -29,6 +31,22 @@ async function maintainWorkBuddySkills(): Promise<void> {
     })
   } catch (err) {
     console.error('[Skills] WorkBuddy 历史目录迁移失败', err)
+  }
+}
+
+async function maintainWorkBuddyUemcp(): Promise<void> {
+  try {
+    const service = listMcpServices().find((s) => s.id === BUILTIN_MCP_UEMCP_ID)
+    if (!service?.enabledApps?.includes('workbuddy')) return
+
+    const result = await ensureMcpToApp('workbuddy', service.id)
+    if (result.ok) {
+      console.log(`[MCP] WorkBuddy UEMCP config: ${result.message}`)
+    } else {
+      console.warn(`[MCP] WorkBuddy UEMCP config: ${result.message}`)
+    }
+  } catch (err) {
+    console.error('[MCP] WorkBuddy UEMCP 配置检查失败', err)
   }
 }
 
@@ -134,6 +152,7 @@ function handleDeepLink(url: string): void {
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(null)
   await maintainWorkBuddySkills()
+  await maintainWorkBuddyUemcp()
 
   if (process.defaultApp) {
     if (process.argv.length >= 2) {
@@ -155,7 +174,7 @@ app.whenReady().then(async () => {
   // 软件打开后自动启动内置 MCP HTTP 服务
   const conn = getDstConnection()
   const mcpList = listMcpServices()
-  for (const svc of mcpList.filter((s) => s.builtin)) {
+  for (const svc of mcpList.filter((s) => s.builtin && s.type !== 'ue-mcp')) {
     if (getMcpRuntime(svc.id).running) continue
     if (!conn.apiKey.trim()) {
       console.warn(`[MCP] Skip auto-start ${svc.id}: Provider API Key 未配置`)

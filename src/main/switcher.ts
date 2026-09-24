@@ -1,6 +1,5 @@
 import type { AppId, ApplyResult, Provider } from '../shared/types'
 import { getAdapter } from './adapters'
-import type { McpServerEntry } from './adapters/types'
 import {
   getProvider,
   getModel,
@@ -10,6 +9,22 @@ import {
   getMcpConnectionInfo,
   markMcpServiceEnabled
 } from './store'
+
+function matchesExpectedMcpEntry(
+  existing: unknown,
+  expected: Record<string, unknown>
+): boolean {
+  return Object.entries(expected).every(([key, value]) => {
+    if (Array.isArray(value)) {
+      const current = existing as Record<string, unknown> | null
+      return (
+        Array.isArray(current?.[key]) &&
+        JSON.stringify(current?.[key]) === JSON.stringify(value)
+      )
+    }
+    return (existing as Record<string, unknown> | null)?.[key] === value
+  })
+}
 
 export async function enableProvider(providerId: string): Promise<ApplyResult> {
   const provider = getProvider(providerId)
@@ -104,11 +119,43 @@ export async function applyMcpToApp(
     }
   }
   const info = getMcpConnectionInfo(serviceId)
-  const entry = info.json as McpServerEntry
+  const entry = info.json
   const result = enabled
     ? await adapter.writeMcp({ [info.key]: entry }, [])
     : await adapter.writeMcp({}, [info.key])
   if (!result.ok) return result
   markMcpServiceEnabled(serviceId, app, enabled)
   return result
+}
+
+/**
+ * 检查目标应用中的 MCP 配置；仅在缺失或内容不一致时重新写入。
+ */
+export async function ensureMcpToApp(
+  app: AppId,
+  serviceId: string
+): Promise<ApplyResult> {
+  const adapter = getAdapter(app)
+  if (!adapter.implemented || !adapter.writeMcp) {
+    return {
+      ok: false,
+      message: `${adapter.name} 尚不支持写入 MCP 配置`
+    }
+  }
+  if (adapter.readMcp) {
+    const info = getMcpConnectionInfo(serviceId)
+    const existing = await adapter.readMcp()
+    if (
+      info.key in existing &&
+      matchesExpectedMcpEntry(existing[info.key], info.json as Record<string, unknown>)
+    ) {
+      markMcpServiceEnabled(serviceId, app, true)
+      return {
+        ok: true,
+        message: `${adapter.name} 已存在 ${info.key} MCP 配置`
+      }
+    }
+  }
+
+  return applyMcpToApp(app, serviceId, true)
 }

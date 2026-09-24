@@ -75,6 +75,7 @@ export type McpServiceType =
   | 'video-generation'
   | 'file-upload'
   | '3d-generation'
+  | 'ue-mcp'
   | 'text-generation'
   | 'custom'
 export type McpProvider = 'gemini-3-pro-image' | 'gpt-image-2' | 'doubao-seedance-2.0' | 'dst' | 'custom'
@@ -224,6 +225,17 @@ export const BUILTIN_MCP_3D_DEFAULTS = {
   type: '3d-generation' as McpServiceType,
   provider: 'dst' as McpProvider,
   baseUrl: DEFAULT_PROVIDER_ENDPOINT
+}
+
+/** 内置 UEMCP 服务；由 WorkBuddy 根据 mcp.json 直接拉起 command 进程。 */
+export const BUILTIN_MCP_UEMCP_ID = 'builtin-mcp-ue-mcp'
+
+export const BUILTIN_MCP_UEMCP_DEFAULTS = {
+  name: 'UE连接工具',
+  type: 'ue-mcp' as McpServiceType,
+  provider: 'custom' as McpProvider,
+  command: 'npx',
+  args: ['-y', 'ue-mcp']
 }
 
 export interface AppSettings {

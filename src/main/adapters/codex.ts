@@ -10,7 +10,7 @@ import {
   launchCodex
 } from '../codex/launcher'
 import { startCodexProxy } from '../codex/proxy'
-import type { AppAdapter, McpServerEntry } from './types'
+import type { AppAdapter, HttpMcpServerEntry, McpServerEntry } from './types'
 
 function codexDir(): string {
   return path.join(os.homedir(), '.codex')
@@ -20,7 +20,7 @@ function configPath(): string {
   return path.join(codexDir(), 'config.toml')
 }
 
-function managedTomlSection(key: string, server: McpServerEntry): string {
+function managedTomlSection(key: string, server: HttpMcpServerEntry): string {
   return [
     '# dasuantou-managed',
     `[mcp_servers.${tomlString(key)}]`,
@@ -267,6 +267,9 @@ async function writeMcp(
   ])
 
   const sections = Object.entries(merge).map(([key, server]) => {
+    if (!('url' in server)) {
+      throw new Error('Codex 暂不支持 command 形式的 MCP 服务')
+    }
     return managedTomlSection(key, server)
   })
   const next =
