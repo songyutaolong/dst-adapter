@@ -72,7 +72,7 @@ npm run dist:mac   # macOS（必须在 Mac 上执行）
 
 ## 联网更新（electron-updater）
 
-应用内置自动更新。CI 设置 `DST_UPDATE_BASE_URL` 后，更新源为阿里 OSS 上的静态文件（`latest.yml` / `latest-mac.yml` 元数据 + 安装包 + blockmap）；未设置时沿用 GitHub Releases 兜底，便于本地和旧流程打包。
+应用内置自动更新。设置 `DST_UPDATE_BASE_URL` 后，更新源为阿里 OSS 上的静态文件（`latest.yml` 元数据 + 安装包 + blockmap）；未设置时沿用 GitHub Releases 兜底，便于本地和旧流程打包。
 
 ### OSS 更新源
 
@@ -85,7 +85,6 @@ https://<bucket>.oss-cn-hangzhou.aliyuncs.com/dst-adapter/releases/
 该前缀下必须同时保存：
 
 - Windows：`latest.yml`、NSIS `.exe`、`.blockmap`
-- macOS：`latest-mac.yml`、`.dmg`、自动更新用 `.zip`、`.blockmap`
 
 自动更新读取的是普通 HTTPS GET，`latest*.yml` 不应是过期缓存。`scripts/publish-oss.mjs` 已将清单设为 `no-cache`，安装包和 blockmap 设为一年 immutable 缓存。桌面端不需要配置 CORS；更新前缀需允许公网读，或通过可公网访问的 CDN 域名提供。私有桶签名 URL 不适合作为长期更新源。
 
@@ -110,17 +109,28 @@ $env:DST_UPDATE_BASE_URL = "https://bucket.oss-cn-hangzhou.aliyuncs.com/dst-adap
 npm run dist:win
 ```
 
+发布 Windows 更新时，在本地继续上传更新必需文件（portable 包不参与自动更新，可不传）：
+
+```powershell
+$env:OSS_ACCESS_KEY_ID = "<RAM AccessKey ID>"
+$env:OSS_ACCESS_KEY_SECRET = "<RAM AccessKey Secret>"
+node scripts/publish-oss.mjs `
+  --dir release `
+  --include "dst-adapter-setup-<version>.exe" `
+  --include "dst-adapter-setup-<version>.exe.blockmap" `
+  --include "latest.yml"
+```
+
 已在 GitHub 上的旧客户端仍会读取 GitHub feed。保留 workflow 里“Attach to GitHub Release”这一步，让它们先更新到第一个 OSS 配置版；之后的新客户端会读取包内 `app-update.yml` 的 OSS generic feed。
 
 ### 发布流程（发新版）
 
 1. 本地改版本号 `package.json` → `version`
-2. 打 tag 并推送（`Build macOS` / `Build Windows` 两个 workflow 自动构建；启用 OSS 后会同时上传 OSS 和 GitHub Release）：
+2. 本地打包 Windows，并用 `scripts/publish-oss.mjs` 上传 `latest.yml`、NSIS `.exe` 和 `.blockmap`：
    ```bash
-   git tag v0.2.0
-   git push origin v0.2.0
+   npm run dist:win
    ```
-3. 或在 Actions 页手动 `Run workflow`（不打 tag 时只上传 artifact 附件，不创建 Release）
+3. 需要留存 CI 构建日志或交叉平台包时，再到 Actions 页手动 `Run workflow`
 
 ### 应用内行为
 
