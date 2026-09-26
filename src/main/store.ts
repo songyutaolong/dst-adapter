@@ -481,7 +481,7 @@ function builtinMcp3DService(): McpService {
   }
 }
 
-/** 内置 UEMCP 服务模板；配置写入 WorkBuddy 后由 WorkBuddy 拉起。 */
+/** 内置 UEMCP 服务模板；配置写入目标应用后由目标应用拉起。 */
 function builtinMcpUemcpService(): McpService {
   const now = new Date().toISOString()
   return {

@@ -34,19 +34,35 @@ async function maintainWorkBuddySkills(): Promise<void> {
   }
 }
 
-async function maintainWorkBuddyUemcp(): Promise<void> {
+async function maintainCodexSkills(): Promise<void> {
+  try {
+    await migrateLegacySkillWorkDirectories({
+      skillsRoot: join(app.getPath('home'), '.codex', 'skills'),
+      backupRoot: join(app.getPath('home'), '.dst-adapter', 'backups', 'codex-skills')
+    })
+  } catch (err) {
+    console.error('[Skills] Codex 历史目录迁移失败', err)
+  }
+}
+
+async function maintainUemcp(): Promise<void> {
   try {
     const service = listMcpServices().find((s) => s.id === BUILTIN_MCP_UEMCP_ID)
-    if (!service?.enabledApps?.includes('workbuddy')) return
+    if (!service) return
+    const apps = (service.enabledApps || []).filter((app): app is 'workbuddy' | 'codex' =>
+      app === 'workbuddy' || app === 'codex')
+    if (!apps.length) return
 
-    const result = await ensureMcpToApp('workbuddy', service.id)
-    if (result.ok) {
-      console.log(`[MCP] WorkBuddy UEMCP config: ${result.message}`)
-    } else {
-      console.warn(`[MCP] WorkBuddy UEMCP config: ${result.message}`)
+    for (const app of apps) {
+      const result = await ensureMcpToApp(app, service.id)
+      if (result.ok) {
+        console.log(`[MCP] ${app} UEMCP config: ${result.message}`)
+      } else {
+        console.warn(`[MCP] ${app} UEMCP config: ${result.message}`)
+      }
     }
   } catch (err) {
-    console.error('[MCP] WorkBuddy UEMCP 配置检查失败', err)
+    console.error('[MCP] UEMCP 配置检查失败', err)
   }
 }
 
@@ -152,7 +168,8 @@ function handleDeepLink(url: string): void {
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(null)
   await maintainWorkBuddySkills()
-  await maintainWorkBuddyUemcp()
+  await maintainCodexSkills()
+  await maintainUemcp()
 
   if (process.defaultApp) {
     if (process.argv.length >= 2) {

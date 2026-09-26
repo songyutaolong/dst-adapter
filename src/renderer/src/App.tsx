@@ -109,9 +109,9 @@ function mcpProviderLabel(service: McpService): string {
   return '自定义'
 }
 
-function mcpCapability(service: McpService): string {
+function mcpCapability(service: McpService, app: AppId): string {
   if (service.type === 'ue-mcp') {
-    return `启动命令：${BUILTIN_MCP_UEMCP_DEFAULTS.command} ${BUILTIN_MCP_UEMCP_DEFAULTS.args.join(' ')}（由 WorkBuddy 自动拉起）`
+    return `启动命令：${BUILTIN_MCP_UEMCP_DEFAULTS.command} ${BUILTIN_MCP_UEMCP_DEFAULTS.args.join(' ')}（由 ${app === 'codex' ? 'Codex' : 'WorkBuddy'} 自动拉起）`
   }
   if (service.type === 'file-upload') {
     return '支持输入：腾讯 COS / 阿里 OSS；本地路径 / Base64 文件（file_path / content 二选一）'
@@ -137,6 +137,7 @@ export default function App() {
   const [form, setForm] = useState<FormState>(emptyForm())
   const [showPlainApiKey, setShowPlainApiKey] = useState(false)
   const [workBuddyPath, setWorkBuddyPath] = useState('')
+  const [codexPath, setCodexPath] = useState('')
   const [busy, setBusy] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [toast, setToast] = useState<{
@@ -321,6 +322,7 @@ export default function App() {
     const existing = providerList[0]
     const apiKey = appSettings?.providerApiKey || existing?.apiKey || ''
     setWorkBuddyPath(appSettings?.workBuddyPath || '')
+    setCodexPath(appSettings?.codexPath || '')
     setForm({
       name: appSettings?.providerName || existing?.name || 'dst',
       endpoint: appSettings?.providerEndpoint || existing?.endpoint || DEFAULT_PROVIDER_ENDPOINT,
@@ -471,6 +473,22 @@ export default function App() {
     }
   }
 
+  const saveCodexPath = async () => {
+    setBusy(true)
+    try {
+      const next = await window.dst.updateSettings({
+        codexPath: codexPath.trim()
+      })
+      setSettings(next)
+      showToast(next.codexPath ? 'Codex 路径已保存' : '已恢复默认 Codex 路径')
+      await refresh()
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   // 启用模型
   const onEnableModel = async (id: string) => {
     setBusy(true)
@@ -589,11 +607,13 @@ export default function App() {
   const onUpdateSkill = async (skill: RemoteSkillPackage) => {
     setSkillAction(skill.id)
     try {
-      const workBuddyRunning = currentApp === 'workbuddy' &&
-        await window.dst.isAppRunning(currentApp)
-      if (workBuddyRunning) {
+      const appRunning =
+        currentApp === 'workbuddy' || currentApp === 'codex'
+          ? await window.dst.isAppRunning(currentApp)
+          : false
+      if (appRunning) {
         setSkillCloseRequired(true)
-        showToast('WorkBuddy 正在运行；请先手动关闭后，再点击安装/更新', true)
+        showToast(`${currentMeta?.name || currentApp} 正在运行；请先完全退出后，再点击安装/更新`, true)
         return
       }
       setSkillCloseRequired(false)
@@ -662,10 +682,10 @@ export default function App() {
     }
   }
 
-  const onUemcpEnable = async (s: McpService) => {
+  const onUemcpEnable = async (s: McpService, app: AppId = 'workbuddy') => {
     setBusy(true)
     try {
-      const result = await window.dst.enableMcpService(s.id, true, 'workbuddy')
+      const result = await window.dst.enableMcpService(s.id, true, app)
       showToast(result.message, !result.ok)
       await refresh()
     } catch (err) {
@@ -683,7 +703,12 @@ export default function App() {
   const currentAppMcpServices = useMemo(
     () =>
       builtinMcpServices
-        .filter((service) => service.type !== 'ue-mcp' || currentApp === 'workbuddy')
+        .filter(
+          (service) =>
+            service.type !== 'ue-mcp' ||
+            currentApp === 'workbuddy' ||
+            currentApp === 'codex'
+        )
         .map((service) => ({
           ...service,
           enabledForCurrentApp: isMcpEnabledForApp(service, currentApp)
@@ -883,6 +908,34 @@ export default function App() {
                 </section>
 
                 <section className="settings-section">
+                  <h3>Codex 路径</h3>
+                  <p className="settings-desc">
+                    留空时会自动检测默认安装目录和 Microsoft Store 安装记录；自动检测失败时，再填写安装目录或 Codex.exe 完整路径。
+                  </p>
+                  <div className="form">
+                    <div className="field">
+                      <label>安装目录 / 可执行文件</label>
+                      <input
+                        type="text"
+                        value={codexPath}
+                        spellCheck={false}
+                        placeholder="例如 D:\Apps\Codex 或 D:\Apps\Codex\Codex.exe"
+                        onChange={(e) => setCodexPath(e.target.value)}
+                      />
+                    </div>
+                    <div className="actions settings-actions">
+                      <button
+                        className="btn primary settings-btn"
+                        disabled={busy}
+                        onClick={saveCodexPath}
+                      >
+                        保存路径
+                      </button>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="settings-section">
                   <h3>Provider 配置</h3>
                   <p className="settings-desc">所有应用共用这份大算头连接信息；保存后自动同步，无需按应用单独配置。</p>
                   <div className="form">
@@ -1000,7 +1053,12 @@ export default function App() {
                                 <button
                                   className="btn primary settings-btn"
                                   disabled={busy}
-                                  onClick={() => onUemcpEnable(s)}
+                                  onClick={() =>
+                                    onUemcpEnable(
+                                      s,
+                                      currentApp === 'codex' ? 'codex' : 'workbuddy'
+                                    )
+                                  }
                                 >
                                   启用配置
                                 </button>
@@ -1306,14 +1364,14 @@ export default function App() {
                             服务商：{mcpProviderLabel(s)}
                           </div>
                           <div className="sub">
-                            {mcpCapability(s)}
+                            {mcpCapability(s, currentApp)}
                           </div>
                           <div className="row mcp-actions">
                             <button
                               className="btn primary"
                               disabled={busy}
                               onClick={() =>
-                                onUemcpEnable(s)
+                                onUemcpEnable(s, currentApp)
                               }
                             >
                               启用
@@ -1391,7 +1449,8 @@ export default function App() {
                               skill.vendor && `厂商：${skill.vendor}`,
                               skill.localVersion && `本地版本：v${skill.localVersion}`,
                               `大小：${formatSkillSize(skill.size)}`,
-                              skill.minWorkBuddyVersion &&
+                              currentApp === 'workbuddy' &&
+                                skill.minWorkBuddyVersion &&
                                 `最低版本：v${skill.minWorkBuddyVersion}`,
                               `对象：${skill.objectKey}`
                             ]

@@ -227,7 +227,7 @@ export const BUILTIN_MCP_3D_DEFAULTS = {
   baseUrl: DEFAULT_PROVIDER_ENDPOINT
 }
 
-/** 内置 UEMCP 服务；由 WorkBuddy 根据 mcp.json 直接拉起 command 进程。 */
+/** 内置 UEMCP 服务；由 WorkBuddy/Codex 根据各自配置直接拉起 command 进程。 */
 export const BUILTIN_MCP_UEMCP_ID = 'builtin-mcp-ue-mcp'
 
 export const BUILTIN_MCP_UEMCP_DEFAULTS = {
@@ -244,6 +244,8 @@ export interface AppSettings {
   locale: 'zh-CN'
   /** Custom WorkBuddy install directory or executable path. */
   workBuddyPath: string
+  /** Custom Codex install directory or executable path. */
+  codexPath: string
   providerName: string
   providerEndpoint: string
   providerApiKey: string
@@ -256,6 +258,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   backupKeep: 10,
   locale: 'zh-CN',
   workBuddyPath: '',
+  codexPath: '',
   providerName: 'dst',
   providerEndpoint: DEFAULT_PROVIDER_ENDPOINT,
   providerApiKey: '',
@@ -298,7 +301,7 @@ export const APP_META: Record<
   },
   codex: {
     name: 'Codex',
-    implemented: false,
+    implemented: true,
     downloadUrl: 'https://openai.com/zh-Hans-CN/codex/'
   },
   cursor: {

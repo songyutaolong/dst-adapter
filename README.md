@@ -179,7 +179,15 @@ Endpoint 可填 Base URL 或完整 `.../v1/chat/completions`；保存时会规�
   ```toml
   [mcp_servers."dst-image-mcp"]
   url = "http://127.0.0.1:17888"
+
+  [mcp_servers."ue-mcp"]
+  command = "npx"
+  args = ["-y", "ue-mcp"]
+  disabled = false
   ```
+- Skill 安装到 `~/.codex/skills/`；停用后移动到 `~/.codex/skills.disabled/`。
+- 设置中可填写 Codex 安装目录或 `Codex.exe` 完整路径；留空时自动检测常见目录和 Microsoft Store 安装记录。
+- 若 Codex 已在运行，适配器不会强制结束进程；写入的新配置需完全退出并重新打开 Codex 后生效。
 - Microsoft Store 版若禁止直接启动包内程序，会回退到系统应用激活；纯 API 配置仍生效。
 
 ## Deep Link（通用）
@@ -197,6 +205,7 @@ dstadapter://v1/import?resource=provider&app=workbuddy&name=MyProvider&endpoint=
   db.json
   backups/workbuddy/
   backups/codex/
+  backups/codex-skills/
   settings（合入 db.json）
 ```
 

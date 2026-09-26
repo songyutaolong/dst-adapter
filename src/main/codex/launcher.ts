@@ -4,8 +4,25 @@ import path from 'path'
 import { execFile, execFileSync, spawn } from 'child_process'
 import { promisify } from 'util'
 import type { Provider } from '../../shared/types'
+import { getSettings } from '../store'
 
 const execFileAsync = promisify(execFile)
+
+function customCodexExecutableCandidates(): string[] {
+  const customPath = getSettings().codexPath?.trim()
+  if (!customPath) return []
+
+  const resolved = path.resolve(customPath)
+  try {
+    if (fs.statSync(resolved).isFile()) return [resolved]
+  } catch {
+    // A missing custom path falls through to normal discovery below.
+  }
+
+  const executableNames =
+    process.platform === 'darwin' ? ['Codex', 'ChatGPT'] : ['Codex.exe', 'ChatGPT.exe']
+  return executableNames.map((name) => path.join(resolved, name))
+}
 
 export function codexExecutableCandidates(): string[] {
   const home = os.homedir()
@@ -25,7 +42,7 @@ export function codexExecutableCandidates(): string[] {
         path.join(programs, 'ChatGPT', 'ChatGPT.exe'),
         path.join(home, 'AppData', 'Local', 'Programs', 'Codex', 'Codex.exe')
       ]
-  return [...new Set(candidates)]
+  return [...new Set([...customCodexExecutableCandidates(), ...candidates])]
 }
 
 type StorePackageInfo = {
@@ -57,7 +74,7 @@ function storePackageInfo(): StorePackageInfo | null {
         '-Command',
         "$p=Get-AppxPackage OpenAI.Codex | Sort-Object Version -Descending | Select-Object -First 1; if($p){Write-Output ($p.PackageFullName+'|'+$p.PackageFamilyName+'|'+$p.InstallLocation)}"
       ],
-      { encoding: 'utf-8', windowsHide: true }
+      { encoding: 'utf8', windowsHide: true }
     ).trim()
     const [fullName, familyName, installLocation] = output.split('|')
     if (!fullName || !familyName || !installLocation) {
@@ -92,52 +109,46 @@ function storePackageInfo(): StorePackageInfo | null {
 function setUserOpenAiKey(apiKey: string): void {
   if (process.platform !== 'win32') return
   try {
+    const encodedKey = Buffer.from(apiKey, 'utf16le').toString('base64')
+    const command =
+      `[Environment]::SetEnvironmentVariable('OPENAI_API_KEY', [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${encodedKey}')), 'User')`
+    const encoded = Buffer.from(command, 'utf16le').toString('base64')
     execFileSync(
       'powershell.exe',
-      [
-        '-NoProfile',
-        '-NonInteractive',
-        '-Command',
-        `[Environment]::SetEnvironmentVariable('OPENAI_API_KEY', '${apiKey.replace(/'/g, "''")}', 'User')`
-      ],
-      { windowsHide: true }
+      ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+      { encoding: 'utf8', windowsHide: true }
     )
   } catch {
     // Best-effort for Store launches that still probe the user environment.
   }
 }
 
-async function quitCodexProcesses(): Promise<void> {
-  if (process.platform === 'win32') {
-    await new Promise<void>((resolve) => {
-      const child = spawn(
-        'powershell.exe',
-        [
-          '-NoProfile',
-          '-NonInteractive',
-          '-Command',
-          "Get-Process ChatGPT,Codex -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue"
-        ],
-        { windowsHide: true, stdio: 'ignore' }
-      )
-      child.once('exit', () => resolve())
-      child.once('error', () => resolve())
-    })
-  } else if (process.platform === 'darwin') {
-    await new Promise<void>((resolve) => {
-      const child = spawn('pkill', ['-f', 'Codex|ChatGPT'], {
-        stdio: 'ignore'
-      })
-      child.once('exit', () => resolve())
-      child.once('error', () => resolve())
-    })
+export async function isCodexRunning(): Promise<boolean> {
+  try {
+    if (process.platform === 'win32') {
+      for (const processName of ['Codex.exe', 'ChatGPT.exe']) {
+        const { stdout } = await execFileAsync(
+          'tasklist',
+          ['/FI', `IMAGENAME eq ${processName}`, '/FO', 'CSV', '/NH'],
+          { windowsHide: true }
+        )
+        if (stdout.toLowerCase().includes(processName.toLowerCase())) return true
+      }
+      return false
+    }
+    if (process.platform === 'darwin') {
+      for (const processName of ['Codex', 'ChatGPT']) {
+        await execFileAsync('pgrep', ['-x', processName], { windowsHide: true })
+        return true
+      }
+    }
+  } catch {
+    return false
   }
-  await new Promise((resolve) => setTimeout(resolve, 800))
+  return false
 }
 
-async function activateStoreCodex(
-  aumid: string
-): Promise<void> {
+async function activateStoreCodex(aumid: string): Promise<void> {
   const source = `
 using System;
 using System.Runtime.InteropServices;
@@ -169,11 +180,9 @@ public static class DasuantouAppActivator {
     return processId;
   }
 }`
-  const escapedSource = source.replace(/'/g, "''")
-  const appId = aumid.replace(/'/g, "''")
   const command = [
-    `Add-Type -TypeDefinition '${escapedSource}'`,
-    `[void][DasuantouAppActivator]::Launch('${appId}','')`
+    `Add-Type -TypeDefinition ${JSON.stringify(source)}`,
+    `[void][DasuantouAppActivator]::Launch(${JSON.stringify(aumid)}, '')`
   ].join(';')
   const encoded = Buffer.from(command, 'utf16le').toString('base64')
   await execFileAsync(
@@ -217,9 +226,28 @@ async function spawnDetached(
   })
 }
 
+function codexChildEnv(apiKey: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    OPENAI_API_KEY: apiKey,
+    CODEX_API_KEY: apiKey
+  }
+  for (const key of Object.keys(env)) {
+    const name = key.toLowerCase()
+    if (
+      name === 'electron_renderer_url' ||
+      name === 'vite_dev_server_url' ||
+      name === 'node_env'
+    ) {
+      delete env[key]
+    }
+  }
+  return env
+}
+
 export async function launchCodex(
   provider: Provider
-): Promise<{ executable: string }> {
+): Promise<{ executable: string; alreadyRunning?: boolean }> {
   const store = storePackageInfo()
   const unpackaged = codexExecutableCandidates().find((candidate) =>
     fs.existsSync(candidate)
@@ -229,16 +257,11 @@ export async function launchCodex(
 
   const apiKey = provider.apiKey.trim()
   setUserOpenAiKey(apiKey)
-
-  const env = {
-    ...process.env,
-    OPENAI_API_KEY: apiKey,
-    CODEX_API_KEY: apiKey
+  if (await isCodexRunning()) {
+    return { executable, alreadyRunning: true }
   }
 
-  // Existing instances keep the old env; restart to load the new API config.
-  await quitCodexProcesses()
-
+  const env = codexChildEnv(apiKey)
   let launched = false
   let launchedPath = executable
 

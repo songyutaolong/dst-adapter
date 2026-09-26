@@ -125,7 +125,7 @@ export function registerIpc(getMainWindow: () => BrowserWindow | null): void {
   ipcMain.handle('adapters:launch', async (_e, app: AppId) => {
     const adapter = getAdapter(app)
     if (!adapter.launch) throw new Error('该应用不支持启动')
-    if (app === 'workbuddy') {
+    if (app === 'workbuddy' || app === 'codex') {
       const service = getMcpService(BUILTIN_MCP_UEMCP_ID)
       if (service?.enabledApps?.includes(app)) {
         const result = await ensureMcpToApp(app, service.id)
@@ -200,7 +200,7 @@ export function registerIpc(getMainWindow: () => BrowserWindow | null): void {
     const service = getMcpService(id)
     if (!service) throw new Error('MCP Service not found')
     if (service.type === 'ue-mcp') {
-      throw new Error('UEMCP 由 WorkBuddy 启动；请先启用配置，再启动 WorkBuddy')
+      throw new Error('UE 连接工具由目标应用启动；请先启用配置，再启动 WorkBuddy 或 Codex')
     }
     const conn = getDstConnection()
     const provider = app ? listProviders(app)[0] : undefined
