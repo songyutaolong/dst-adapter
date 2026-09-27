@@ -16,6 +16,11 @@ import { atomicWriteText, backupFile, backupsDir, getSettings } from '../store'
 import { installSkillPackage } from '../skills/installer'
 import { downloadSkillPackage, fetchSkillCatalog } from '../skills/catalog'
 import { compareVersions } from '../skills/version'
+import {
+  deleteWorkBuddySession,
+  listWorkBuddySessions,
+  readWorkBuddySessionMessages
+} from './sessions'
 import type {
   AppAdapter,
   McpServerEntry
@@ -222,6 +227,33 @@ async function writeLive(provider: Provider): Promise<ApplyResult> {
   return {
     ok: true,
     message: `已写入 WorkBuddy models.json（模型 ${next.id}）`,
+    backupPath
+  }
+}
+
+async function removeModel(modelId: string): Promise<ApplyResult> {
+  const file = modelsPath()
+  if (!fs.existsSync(file)) {
+    return { ok: true, message: `WorkBuddy models.json 不存在，无需移除模型 ${modelId}` }
+  }
+
+  let models: WorkBuddyModel[] = []
+  try {
+    models = parseModels(fs.readFileSync(file, 'utf-8'))
+  } catch {
+    models = []
+  }
+
+  const next = models.filter((m) => m.id !== modelId)
+  if (next.length === models.length) {
+    return { ok: true, message: `模型 ${modelId} 不在 WorkBuddy models.json 中` }
+  }
+
+  const backupPath = backupFile('workbuddy', file)
+  atomicWriteText(file, serializeModels(next))
+  return {
+    ok: true,
+    message: `已从 WorkBuddy models.json 移除模型 ${modelId}`,
     backupPath
   }
 }
@@ -525,11 +557,15 @@ export const workbuddyAdapter: AppAdapter = {
   detect,
   readLive,
   writeLive,
+  removeModel,
   writeMcp,
   readMcp,
   listSkills,
   setSkillEnabled,
   updateSkill,
   isRunning: isWorkBuddyRunning,
+  listSessions: listWorkBuddySessions,
+  readSessionMessages: readWorkBuddySessionMessages,
+  deleteSession: deleteWorkBuddySession,
   launch
 }

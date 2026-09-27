@@ -21,6 +21,11 @@ import { startCodexProxy } from '../codex/proxy'
 import { downloadSkillPackage, fetchSkillCatalog } from '../skills/catalog'
 import { installSkillPackage } from '../skills/installer'
 import { compareVersions } from '../skills/version'
+import {
+  deleteCodexSession,
+  listCodexSessions,
+  readCodexSessionMessages
+} from './sessions'
 import type { AppAdapter, McpServerEntry } from './types'
 
 function codexDir(): string {
@@ -497,5 +502,8 @@ export const codexAdapter: AppAdapter = {
   setSkillEnabled,
   updateSkill,
   isRunning: isCodexRunning,
+  listSessions: listCodexSessions,
+  readSessionMessages: readCodexSessionMessages,
+  deleteSession: deleteCodexSession,
   launch
 }

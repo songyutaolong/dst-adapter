@@ -1,5 +1,14 @@
 import { app, ipcMain, BrowserWindow, shell, clipboard } from 'electron'
-import type { AppId, Provider, McpService, ModelConfig, ModelInfo, SyncModelsResult } from '../shared/types'
+import type {
+  AppId,
+  Provider,
+  McpService,
+  ModelConfig,
+  ModelInfo,
+  Prompt,
+  SessionMessagesOptions,
+  SyncModelsResult
+} from '../shared/types'
 import {
   APP_META,
   BUILTIN_MCP_UEMCP_ID,
@@ -25,18 +34,22 @@ import {
   listModels,
   getModel,
   updateModel,
-  disableModel,
   getEnabledModel,
   saveModelsFromApi,
-  getLastSyncAt
+  getLastSyncAt,
+  listPrompts,
+  createPrompt,
+  updatePrompt,
+  deletePrompt
 } from './store'
 import {
   enableProvider,
   enableModel as enableModelForApp,
+  disableModel as disableModelForApp,
   applyMcpToApp,
   ensureMcpToApp
 } from './switcher'
-import { fetchModels, speedTest } from './speedtest'
+import { fetchMe, fetchModels, speedTest } from './speedtest'
 import { rebuildTrayMenu } from './tray'
 import { parseDeepLink } from '../shared/url'
 import { launchMcpService, stopMcpService as stopMcpProcess, getMcpRuntime } from './mcp/launcher'
@@ -109,6 +122,12 @@ export function registerIpc(getMainWindow: () => BrowserWindow | null): void {
     'providers:fetchModels',
     (_e, endpoint: string, apiKey: string) => fetchModels(endpoint, apiKey)
   )
+
+  // 网关身份：主进程用已保存的连接信息请求 /v1/me，渲染进程无需传 Key
+  ipcMain.handle('providers:me', () => {
+    const conn = getDstConnection()
+    return fetchMe(conn.endpoint || DEFAULT_PROVIDER_ENDPOINT, conn.apiKey)
+  })
 
   ipcMain.handle('settings:get', () => getSettings())
   ipcMain.handle('settings:update', (_e, patch) => {
@@ -292,13 +311,63 @@ export function registerIpc(getMainWindow: () => BrowserWindow | null): void {
     return result
   })
 
-  ipcMain.handle('models:disable', (_e, id: string) => {
-    const model = disableModel(id)
+  ipcMain.handle('models:disable', async (_e, id: string) => {
+    const result = await disableModelForApp(id)
     rebuildTrayMenu(getMainWindow)
-    return model
+    return result
   })
 
   ipcMain.handle('models:lastSyncAt', () => getLastSyncAt())
+
+  // ── Sessions ──
+
+  ipcMain.handle('sessions:list', async (_e, app: AppId) => {
+    const adapter = getAdapter(app)
+    if (!adapter.listSessions) {
+      throw new Error(`${adapter.name} 尚不支持会话管理`)
+    }
+    return adapter.listSessions()
+  })
+
+  ipcMain.handle(
+    'sessions:messages',
+    async (_e, app: AppId, sessionId: string, opts?: SessionMessagesOptions) => {
+      const adapter = getAdapter(app)
+      if (!adapter.readSessionMessages) {
+        throw new Error(`${adapter.name} 尚不支持会话消息读取`)
+      }
+      return adapter.readSessionMessages(sessionId, opts)
+    }
+  )
+
+  ipcMain.handle('sessions:delete', async (_e, app: AppId, sessionId: string) => {
+    const adapter = getAdapter(app)
+    if (!adapter.deleteSession) {
+      throw new Error(`${adapter.name} 尚不支持会话删除`)
+    }
+    const result = await adapter.deleteSession(sessionId)
+    if (result.ok) rebuildTrayMenu(getMainWindow)
+    return result
+  })
+
+  // ── Prompts（个人提示词） ──
+
+  ipcMain.handle('prompts:list', () => listPrompts())
+
+  ipcMain.handle(
+    'prompts:create',
+    (_e, input: Omit<Prompt, 'id' | 'createdAt' | 'updatedAt'>) => createPrompt(input)
+  )
+
+  ipcMain.handle(
+    'prompts:update',
+    (_e, id: string, patch: Partial<Omit<Prompt, 'id' | 'createdAt'>>) => updatePrompt(id, patch)
+  )
+
+  ipcMain.handle('prompts:delete', (_e, id: string) => {
+    deletePrompt(id)
+    return true
+  })
 
   ipcMain.handle(
     'models:sync',

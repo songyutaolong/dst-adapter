@@ -123,10 +123,68 @@ export interface SpeedTestResult {
   modelsSample?: string[]
 }
 
+/** GET /v1/me：网关 API Key 对应的最小用户/组织身份 */
+export interface GatewayMeInfo {
+  user: {
+    id: number
+    username: string
+    display_name: string
+  }
+  organization: {
+    id: number
+    name: string
+  } | null
+}
+
+export interface GatewayMeResult {
+  ok: boolean
+  status?: number
+  info?: GatewayMeInfo
+  error?: string
+}
+
 export interface ApplyResult {
   ok: boolean
   message: string
   backupPath?: string
+}
+
+/** 会话管理：单个历史会话的元信息（只读扫描自应用本地落盘文件） */
+export interface SessionMeta {
+  app: AppId
+  sessionId: string
+  title: string
+  summary: string
+  projectDir: string
+  createdAt: string
+  lastActiveAt: string
+  sourcePath: string
+}
+
+export type SessionMessageRole = 'user' | 'assistant' | 'tool'
+
+export interface SessionMessage {
+  role: SessionMessageRole
+  text: string
+  timestamp?: string
+}
+
+/** 会话消息读取选项：不传 cursor 时返回最新的一页 */
+export interface SessionMessagesOptions {
+  /** 上一页返回的游标（文件字节偏移），向更早方向翻页 */
+  cursor?: number
+  limit?: number
+}
+
+/** 会话消息分页结果：大文件只读尾部窗口，更早的消息按需加载 */
+export interface SessionMessagesPage {
+  messages: SessionMessage[]
+  /** 是否还有更早的消息 */
+  hasMore: boolean
+  /** 加载下一页（更早）时回传的游标 */
+  cursor?: number
+  /** 小文件全量解析时的消息总数 */
+  total?: number
 }
 
 export interface SyncModelsResult {
@@ -135,6 +193,16 @@ export interface SyncModelsResult {
   models?: ModelInfo[]
   count?: number
   lastSyncAt?: string
+}
+
+/** 提示词管理：用户自己维护的个人提示词（"使用"即复制到系统剪贴板） */
+export interface Prompt {
+  id: string
+  name: string
+  /** 提示词正文（多行） */
+  content: string
+  createdAt: string
+  updatedAt: string
 }
 
 /** OSS Skill 仓储中的可安装包；凭据和签名 URL 不进入渲染进程。 */

@@ -2,6 +2,9 @@ import type {
   ApplyResult,
   DetectResult,
   Provider,
+  SessionMeta,
+  SessionMessagesOptions,
+  SessionMessagesPage,
   SkillCatalogResult
 } from '../../shared/types'
 
@@ -26,6 +29,8 @@ export interface AppAdapter {
   detect(): Promise<DetectResult>
   readLive(): Promise<unknown>
   writeLive(provider: Provider): Promise<ApplyResult>
+  /** 从应用配置中移除指定模型（支持多模型并存的应用） */
+  removeModel?(modelId: string): Promise<ApplyResult>
   /** 合并/移除 MCP 服务配置到目标应用 */
   writeMcp?(
     merge: Record<string, McpServerEntry>,
@@ -41,6 +46,15 @@ export interface AppAdapter {
   updateSkill?(id: string): Promise<ApplyResult>
   /** 查询目标应用是否正在运行 */
   isRunning?(): Promise<boolean>
+  /** 扫描应用本地落盘的历史会话（只读） */
+  listSessions?(): Promise<SessionMeta[]>
+  /** 分页读取会话消息：不传 cursor 返回最新一页，向更早方向翻页 */
+  readSessionMessages?(
+    sessionId: string,
+    opts?: SessionMessagesOptions
+  ): Promise<SessionMessagesPage>
+  /** 删除一个历史会话（含落盘文件） */
+  deleteSession?(sessionId: string): Promise<ApplyResult>
   launch?(): Promise<void | { message?: string }>
   requiresQuitBeforeWrite?: boolean
 }

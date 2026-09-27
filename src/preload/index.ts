@@ -4,11 +4,16 @@ import type {
   AppInfo,
   AppSettings,
   ApplyResult,
+  GatewayMeResult,
   Provider,
   SpeedTestResult,
   McpService,
   Model,
   ModelConfig,
+  Prompt,
+  SessionMeta,
+  SessionMessagesOptions,
+  SessionMessagesPage,
   SkillCatalogResult,
   SyncModelsResult,
   UpdateState
@@ -41,6 +46,7 @@ const api = {
     apiKey: string
   ): Promise<{ ok: boolean; models: string[]; error?: string }> =>
     ipcRenderer.invoke('providers:fetchModels', endpoint, apiKey),
+  fetchMe: (): Promise<GatewayMeResult> => ipcRenderer.invoke('providers:me'),
   getSettings: (): Promise<AppSettings> => ipcRenderer.invoke('settings:get'),
   updateSettings: (patch: Partial<AppSettings>): Promise<AppSettings> =>
     ipcRenderer.invoke('settings:update', patch),
@@ -104,7 +110,7 @@ const api = {
     ipcRenderer.invoke('models:update', id, config),
   enableModel: (id: string, app: AppId): Promise<ApplyResult> =>
     ipcRenderer.invoke('models:enable', id, app),
-  disableModel: (id: string): Promise<Model> =>
+  disableModel: (id: string): Promise<ApplyResult> =>
     ipcRenderer.invoke('models:disable', id),
   getLastSyncAt: (): Promise<string | undefined> =>
     ipcRenderer.invoke('models:lastSyncAt'),
@@ -115,6 +121,24 @@ const api = {
     apiKey: string
   ): Promise<SyncModelsResult> =>
     ipcRenderer.invoke('models:sync', providerId, app, endpoint, apiKey),
+  // Sessions
+  listSessions: (app: AppId): Promise<SessionMeta[]> =>
+    ipcRenderer.invoke('sessions:list', app),
+  getSessionMessages: (
+    app: AppId,
+    sessionId: string,
+    opts?: SessionMessagesOptions
+  ): Promise<SessionMessagesPage> =>
+    ipcRenderer.invoke('sessions:messages', app, sessionId, opts),
+  deleteSession: (app: AppId, sessionId: string): Promise<ApplyResult> =>
+    ipcRenderer.invoke('sessions:delete', app, sessionId),
+  // Prompts（个人提示词）
+  listPrompts: (): Promise<Prompt[]> => ipcRenderer.invoke('prompts:list'),
+  createPrompt: (input: Omit<Prompt, 'id' | 'createdAt' | 'updatedAt'>): Promise<Prompt> =>
+    ipcRenderer.invoke('prompts:create', input),
+  updatePrompt: (id: string, patch: Partial<Omit<Prompt, 'id' | 'createdAt'>>): Promise<Prompt> =>
+    ipcRenderer.invoke('prompts:update', id, patch),
+  deletePrompt: (id: string): Promise<boolean> => ipcRenderer.invoke('prompts:delete', id),
   // Auto Update
   getUpdateState: (): Promise<UpdateState> => ipcRenderer.invoke('update:getState'),
   checkForUpdate: (userInitiated = false): Promise<UpdateState> =>

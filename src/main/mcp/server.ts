@@ -25,7 +25,8 @@ import {
  *   - video_task_query 查询视频生成任务状态（单次查询，不轮询；轮询节奏由调用方控制）
  *   - file_upload      文件上传（返回临时公网访问 URL；支持腾讯 COS / 阿里 OSS）
  *   - text_to_model_3d / image_to_model_3d / multiview_to_model_3d
- *   - generation_3d_task_query 查询 3D 生成任务状态
+ *   - texture_model_3d / decimate_mesh_3d / segment_mesh_3d / rig_check_3d / rig_model_3d（TriPo 后处理）
+ *   - generation_3d_task_query 查询 3D 生成/后处理任务状态
  */
 
 export const MCP_PROTOCOL_VERSION = '2025-06-18'
@@ -1035,6 +1036,7 @@ async function generateImageToModel3D(
   if (!input) {
     throw { code: -32602, message: '缺少参数 input（单张图片 URL）' } as JsonRpcError
   }
+  assertPublicHttpsUrl(input, 'input')
 
   const body: Record<string, unknown> = {
     input,
@@ -1084,6 +1086,12 @@ async function generateMultiviewToModel3D(
   for (const item of inputs) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) {
       throw { code: -32602, message: 'inputs 的每一项必须是对象，例如 {"front":"https://..."}' } as JsonRpcError
+    }
+    for (const [view, url] of Object.entries(item as Record<string, unknown>)) {
+      if (typeof url !== 'string' || !url.trim()) {
+        throw { code: -32602, message: `inputs 的视角 ${view} 必须是公网 HTTPS 图片 URL` } as JsonRpcError
+      }
+      assertPublicHttpsUrl(url, `inputs.${view}`)
     }
   }
 
@@ -1146,6 +1154,426 @@ async function query3DGenerationTask(service: McpService, taskId: string): Promi
     fail_reason: data.fail_reason,
     data
   }
+}
+
+/* ───────────────────────── TriPo 后处理任务 ───────────────────────── */
+
+/** 校验公网 HTTPS URL：不得携带用户信息/fragment，不得是本机、私网、回环或链路本地地址。 */
+function assertPublicHttpsUrl(value: string, fieldName: string): void {
+  let url: URL
+  try {
+    url = new URL(value.trim())
+  } catch {
+    throw { code: -32602, message: `${fieldName} 不是合法 URL: ${value}` } as JsonRpcError
+  }
+  if (url.protocol !== 'https:') {
+    throw { code: -32602, message: `${fieldName} 必须是公网 HTTPS URL（当前协议 ${url.protocol}）` } as JsonRpcError
+  }
+  if (url.username || url.password) {
+    throw { code: -32602, message: `${fieldName} 不能携带用户信息` } as JsonRpcError
+  }
+  if (url.hash) {
+    throw { code: -32602, message: `${fieldName} 不能携带 fragment` } as JsonRpcError
+  }
+  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  if (!host || host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) {
+    throw { code: -32602, message: `${fieldName} 不能使用本机或本地域名，必须是公网 HTTPS URL` } as JsonRpcError
+  }
+  const ipVersion = isIP(host)
+  if (ipVersion === 4 && !isPublicIpv4(host)) {
+    throw { code: -32602, message: `${fieldName} 不能使用私网、回环或链路本地地址` } as JsonRpcError
+  }
+  if (ipVersion === 6 && !isPublicIpv6(host)) {
+    throw { code: -32602, message: `${fieldName} 不能使用私网、回环或链路本地地址` } as JsonRpcError
+  }
+}
+
+function assert3DApiKey(service: McpService): void {
+  if (!service.apiKey.trim()) {
+    throw { code: -32603, message: '未配置 API Key，请在设置中填写后再请求' } as JsonRpcError
+  }
+}
+
+function pickPostProcessBoolean(params: Record<string, unknown>, key: string): boolean | undefined {
+  const value = params[key]
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'boolean') {
+    throw { code: -32602, message: `参数 ${key} 必须是布尔值` } as JsonRpcError
+  }
+  return value
+}
+
+function pickPostProcessInteger(params: Record<string, unknown>, key: string): number | undefined {
+  const value = params[key]
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'number' || !Number.isInteger(value)) {
+    throw { code: -32602, message: `参数 ${key} 必须是整数` } as JsonRpcError
+  }
+  return value
+}
+
+function pickPostProcessEnum(
+  params: Record<string, unknown>,
+  key: string,
+  allowed: readonly string[]
+): string | undefined {
+  const value = params[key]
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'string' || !allowed.includes(value)) {
+    throw { code: -32602, message: `参数 ${key} 只支持 ${allowed.join(' / ')}` } as JsonRpcError
+  }
+  return value
+}
+
+/**
+ * TriPo 后处理模型：只接受与接口匹配的公开模型前缀（如贴图只收 Tripo-Texture-*）。
+ * 省略时不硬编码默认值，交给网关按接口默认模型路由。
+ */
+function pick3DPostProcessModel(
+  service: McpService,
+  params: Record<string, unknown>,
+  family: string,
+  action: string
+): string | undefined {
+  const requested = typeof params.model === 'string' ? params.model.trim() : ''
+  if (requested) {
+    if (!requested.startsWith(family)) {
+      throw {
+        code: -32602,
+        message: `${action} 的 model 只能使用 ${family}* 系列公开模型，当前为 ${requested}`
+      } as JsonRpcError
+    }
+    return requested
+  }
+  const fallback = service.modelId.trim()
+  return fallback.startsWith(family) ? fallback : undefined
+}
+
+/** part_names：非空字符串数组，元素不能是空白字符串。 */
+function parsePartNames(value: unknown, key: string): string[] | undefined {
+  if (value === undefined || value === null) return undefined
+  if (!Array.isArray(value) || value.length === 0) {
+    throw { code: -32602, message: `参数 ${key} 必须是非空字符串数组` } as JsonRpcError
+  }
+  const names = value.map((item) => (typeof item === 'string' ? item.trim() : ''))
+  if (names.some((name) => !name)) {
+    throw { code: -32602, message: `参数 ${key} 的元素不能是空白字符串` } as JsonRpcError
+  }
+  return names
+}
+
+/** texture_prompt：text / image / images 三者必选其一；style_image 只能搭配 text。 */
+function parseTexturePrompt(value: unknown): Record<string, unknown> | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw { code: -32602, message: '参数 texture_prompt 必须是对象' } as JsonRpcError
+  }
+  const prompt = value as Record<string, unknown>
+  const hasText = prompt.text !== undefined
+  const hasImage = prompt.image !== undefined
+  const hasImages = prompt.images !== undefined
+  if ([hasText, hasImage, hasImages].filter(Boolean).length !== 1) {
+    throw {
+      code: -32602,
+      message: 'texture_prompt 必须且只能包含 text / image / images 三者之一'
+    } as JsonRpcError
+  }
+
+  const result: Record<string, unknown> = {}
+  if (prompt.style_image !== undefined) {
+    if (!hasText) {
+      throw { code: -32602, message: 'texture_prompt.style_image 只能搭配 text 使用' } as JsonRpcError
+    }
+    if (typeof prompt.style_image !== 'string' || !prompt.style_image.trim()) {
+      throw { code: -32602, message: 'texture_prompt.style_image 必须是公网 HTTPS 图片 URL' } as JsonRpcError
+    }
+    assertPublicHttpsUrl(prompt.style_image, 'texture_prompt.style_image')
+    result.style_image = prompt.style_image.trim()
+  }
+  if (hasText) {
+    if (typeof prompt.text !== 'string' || !prompt.text.trim()) {
+      throw { code: -32602, message: 'texture_prompt.text 必须是非空字符串' } as JsonRpcError
+    }
+    if (prompt.text.length > 1024) {
+      throw { code: -32602, message: 'texture_prompt.text 最长 1024 个字符' } as JsonRpcError
+    }
+    result.text = prompt.text
+  } else if (hasImage) {
+    if (typeof prompt.image !== 'string' || !prompt.image.trim()) {
+      throw { code: -32602, message: 'texture_prompt.image 必须是公网 HTTPS 图片 URL' } as JsonRpcError
+    }
+    assertPublicHttpsUrl(prompt.image, 'texture_prompt.image')
+    result.image = prompt.image.trim()
+  } else {
+    if (!Array.isArray(prompt.images) || prompt.images.length !== 4) {
+      throw {
+        code: -32602,
+        message: 'texture_prompt.images 必须恰好包含 4 个公网 HTTPS 图片 URL'
+      } as JsonRpcError
+    }
+    const images: string[] = []
+    for (const item of prompt.images) {
+      if (typeof item !== 'string' || !item.trim()) {
+        throw { code: -32602, message: 'texture_prompt.images 的每一项都必须是 URL 字符串' } as JsonRpcError
+      }
+      assertPublicHttpsUrl(item, 'texture_prompt.images')
+      images.push(item.trim())
+    }
+    result.images = images
+  }
+  return result
+}
+
+/** 提交 TriPo 后处理任务：统一 POST + 解析 {code:'success', data:{task_id,...}} 信封。 */
+async function submit3DPostProcess(
+  service: McpService,
+  action: string,
+  apiPath: string,
+  body: Record<string, unknown>
+): Promise<{ task_id: string; status: string; progress: string }> {
+  const endpoint = `${toApiRoot(service.baseUrl)}${apiPath}`
+  const resp = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${service.apiKey.trim()}`
+    },
+    body: JSON.stringify(body)
+  })
+  const text = await resp.text()
+  if (!resp.ok) {
+    throw { code: resp.status, message: `${action} 提交失败 ${resp.status}: ${text.slice(0, 500)}` } as JsonRpcError
+  }
+
+  const result = text ? (jsonOrThrow(text) as any) : null
+  assert3DResponseSuccess(result, action)
+  const taskId = result?.data?.task_id
+  if (!taskId) {
+    throw { code: -32603, message: `${action} 返回缺少 task_id` } as JsonRpcError
+  }
+  return {
+    task_id: taskId,
+    status: result.data?.status || 'submitted',
+    progress: result.data?.progress || '10%'
+  }
+}
+
+/** 提取并校验后处理入参 input（公网 HTTPS URL）。 */
+function pickPostProcessInput(params: Record<string, unknown>): string {
+  const input = typeof params.input === 'string' ? params.input.trim() : ''
+  if (!input) {
+    throw { code: -32602, message: '缺少参数 input（待处理模型的公网 HTTPS URL）' } as JsonRpcError
+  }
+  assertPublicHttpsUrl(input, 'input')
+  return input
+}
+
+/** 贴图：POST /v1/3d/models/texture */
+async function postProcessTexture(
+  service: McpService,
+  params?: Record<string, unknown>
+): Promise<unknown> {
+  assert3DApiKey(service)
+  const args = params || {}
+  const input = pickPostProcessInput(args)
+
+  const model = pick3DPostProcessModel(service, args, 'Tripo-Texture-', '贴图')
+  const textureQuality = pickPostProcessEnum(args, 'texture_quality', [
+    'fast',
+    'standard',
+    'detailed',
+    'extreme'
+  ])
+  const delight = pickPostProcessBoolean(args, 'delight')
+  // fast 与 delight 仅 Tripo-Texture-v3.5 支持（省略 model 时网关默认 v3.0）
+  const v35Only: string[] = []
+  if (textureQuality === 'fast') v35Only.push('texture_quality=fast')
+  if (delight === true) v35Only.push('delight=true')
+  if (v35Only.length > 0 && model !== 'Tripo-Texture-v3.5') {
+    throw {
+      code: -32602,
+      message: `${v35Only.join('、')} 仅 Tripo-Texture-v3.5 支持；请传 model=Tripo-Texture-v3.5 或去掉该参数`
+    } as JsonRpcError
+  }
+
+  const body: Record<string, unknown> = { input }
+  if (model) body.model = model
+  const pbr = pickPostProcessBoolean(args, 'pbr')
+  if (pbr !== undefined) body.pbr = pbr
+  const seed = pickPostProcessInteger(args, 'texture_seed')
+  if (seed !== undefined) body.texture_seed = seed
+  const alignment = pickPostProcessEnum(args, 'texture_alignment', ['original_image', 'geometry'])
+  if (alignment) body.texture_alignment = alignment
+  if (textureQuality) body.texture_quality = textureQuality
+  const partNames = parsePartNames(args.part_names, 'part_names')
+  if (partNames) body.part_names = partNames
+  const compress = pickPostProcessEnum(args, 'compress', ['geometry'])
+  if (compress) body.compress = compress
+  const bake = pickPostProcessBoolean(args, 'bake')
+  if (bake !== undefined) body.bake = bake
+  if (delight !== undefined) body.delight = delight
+  const texturePrompt = parseTexturePrompt(args.texture_prompt)
+  if (texturePrompt) body.texture_prompt = texturePrompt
+
+  const submitted = await submit3DPostProcess(service, '贴图', '/v1/3d/models/texture', body)
+  return { tool: 'texture_model_3d', ...submitted }
+}
+
+/** 重拓扑/减面：POST /v1/3d/mesh/decimate */
+async function postProcessDecimate(
+  service: McpService,
+  params?: Record<string, unknown>
+): Promise<unknown> {
+  assert3DApiKey(service)
+  const args = params || {}
+  const input = pickPostProcessInput(args)
+
+  const faceLimit = pickPostProcessInteger(args, 'face_limit')
+  if (faceLimit === undefined || faceLimit <= 0) {
+    throw { code: -32602, message: '缺少参数 face_limit（目标面数，必须大于 0）' } as JsonRpcError
+  }
+
+  const model = pick3DPostProcessModel(service, args, 'Tripo-Retopology-', '重拓扑')
+  const bake = pickPostProcessBoolean(args, 'bake')
+  const partNames = parsePartNames(args.part_names, 'part_names')
+  if (model === 'Tripo-Retopology-v1.0') {
+    const unsupported: string[] = []
+    if (bake !== undefined) unsupported.push('bake')
+    if (partNames) unsupported.push('part_names')
+    if (unsupported.length > 0) {
+      throw {
+        code: -32602,
+        message: `${unsupported.join('、')} 仅 Tripo-Retopology-v2.0 支持`
+      } as JsonRpcError
+    }
+  }
+
+  const body: Record<string, unknown> = { input, face_limit: faceLimit }
+  if (model) body.model = model
+  const quad = pickPostProcessBoolean(args, 'quad')
+  if (quad !== undefined) body.quad = quad
+  if (bake !== undefined) body.bake = bake
+  if (partNames) body.part_names = partNames
+
+  const submitted = await submit3DPostProcess(service, '重拓扑', '/v1/3d/mesh/decimate', body)
+  return { tool: 'decimate_mesh_3d', ...submitted }
+}
+
+/** 网格分割：POST /v1/3d/mesh/segment */
+async function postProcessSegment(
+  service: McpService,
+  params?: Record<string, unknown>
+): Promise<unknown> {
+  assert3DApiKey(service)
+  const args = params || {}
+  const input = pickPostProcessInput(args)
+
+  const model = pick3DPostProcessModel(service, args, 'Tripo-Segment-', '网格分割')
+  const granularity = pickPostProcessEnum(args, 'segmentation_granularity', [
+    'simple',
+    'balanced',
+    'detailed'
+  ])
+  const splitByConnectivity = pickPostProcessBoolean(args, 'split_by_connectivity')
+  const refImage = typeof args.ref_image === 'string' ? args.ref_image.trim() : ''
+
+  if (model === 'Tripo-Segment-v1.0') {
+    const unsupported: string[] = []
+    if (granularity) unsupported.push('segmentation_granularity')
+    if (splitByConnectivity !== undefined) unsupported.push('split_by_connectivity')
+    if (refImage) unsupported.push('ref_image')
+    if (unsupported.length > 0) {
+      throw {
+        code: -32602,
+        message: `${unsupported.join('、')} 仅 Tripo-Segment-v2.0 支持`
+      } as JsonRpcError
+    }
+  }
+  if (refImage) {
+    assertPublicHttpsUrl(refImage, 'ref_image')
+    if (granularity || splitByConnectivity !== undefined) {
+      throw {
+        code: -32602,
+        message: 'ref_image 不能与 segmentation_granularity / split_by_connectivity 同时使用'
+      } as JsonRpcError
+    }
+  }
+
+  const body: Record<string, unknown> = { input }
+  if (model) body.model = model
+  if (granularity) body.segmentation_granularity = granularity
+  if (splitByConnectivity !== undefined) body.split_by_connectivity = splitByConnectivity
+  if (refImage) body.ref_image = refImage
+
+  const submitted = await submit3DPostProcess(service, '网格分割', '/v1/3d/mesh/segment', body)
+  return { tool: 'segment_mesh_3d', ...submitted }
+}
+
+/** 绑骨检测：POST /v1/3d/animations/rig-check（无模型参数，免费任务） */
+async function postProcessRigCheck(
+  service: McpService,
+  params?: Record<string, unknown>
+): Promise<unknown> {
+  assert3DApiKey(service)
+  const input = pickPostProcessInput(params || {})
+
+  // URL 路径带扩展名时必须是 .glb
+  let pathname = ''
+  try {
+    pathname = new URL(input).pathname.toLowerCase()
+  } catch {
+    /* pickPostProcessInput 已校验过合法性 */
+  }
+  const ext = path.extname(pathname)
+  if (ext && ext !== '.glb') {
+    throw {
+      code: -32602,
+      message: `绑骨检测的 input 路径带扩展名时必须是 .glb（当前 ${ext}）`
+    } as JsonRpcError
+  }
+
+  const submitted = await submit3DPostProcess(service, '绑骨检测', '/v1/3d/animations/rig-check', {
+    input
+  })
+  return { tool: 'rig_check_3d', ...submitted }
+}
+
+/** 绑骨：POST /v1/3d/animations/rig */
+async function postProcessRig(
+  service: McpService,
+  params?: Record<string, unknown>
+): Promise<unknown> {
+  assert3DApiKey(service)
+  const args = params || {}
+  const input = pickPostProcessInput(args)
+
+  const model = pick3DPostProcessModel(service, args, 'Tripo-Rigging-', '绑骨')
+  const rigType = pickPostProcessEnum(args, 'rig_type', [
+    'biped',
+    'quadruped',
+    'hexapod',
+    'octopod',
+    'avian',
+    'serpentine',
+    'aquatic'
+  ])
+  if (model === 'Tripo-Rigging-v1.0' && rigType && rigType !== 'biped') {
+    throw {
+      code: -32602,
+      message: 'Tripo-Rigging-v1.0 仅支持 rig_type=biped；其他骨架类型请使用 Tripo-Rigging-v2.5'
+    } as JsonRpcError
+  }
+
+  const body: Record<string, unknown> = { input }
+  if (model) body.model = model
+  if (rigType) body.rig_type = rigType
+  const spec = pickPostProcessEnum(args, 'spec', ['tripo', 'mixamo'])
+  if (spec) body.spec = spec
+  const outFormat = pickPostProcessEnum(args, 'out_format', ['glb', 'fbx'])
+  if (outFormat) body.out_format = outFormat
+
+  const submitted = await submit3DPostProcess(service, '绑骨', '/v1/3d/animations/rig', body)
+  return { tool: 'rig_model_3d', ...submitted }
 }
 
 /** 通过 Provider Key 读取所属组织的云存储配置（凭据只在内存中短暂使用）。 */
@@ -1766,14 +2194,150 @@ function listTools(serviceType: string): unknown[] {
         }
       },
       {
+        name: 'texture_model_3d',
+        description:
+          '模型贴图：为已有 3D 模型生成或更新贴图，提交 TriPo 后处理任务；提交后用 generation_3d_task_query 查询进度',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            input: { type: 'string', description: '待处理模型的公网 HTTPS URL（必填）' },
+            model: {
+              type: 'string',
+              description:
+                '公开模型：Tripo-Texture-v3.5 / Tripo-Texture-v3.0（默认）/ Tripo-Texture-v2.5；texture_quality=fast 与 delight=true 仅 v3.5 支持'
+            },
+            pbr: { type: 'boolean', description: '是否生成 PBR 贴图' },
+            texture_seed: { type: 'integer', description: '贴图随机种子' },
+            texture_alignment: {
+              type: 'string',
+              enum: ['original_image', 'geometry'],
+              description: '贴图对齐方式'
+            },
+            texture_quality: {
+              type: 'string',
+              enum: ['fast', 'standard', 'detailed', 'extreme'],
+              description: '贴图质量档位，省略按 standard 计费；fast 仅 v3.5 支持'
+            },
+            part_names: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '需要处理的部件名列表，元素不能为空白字符串'
+            },
+            compress: { type: 'string', enum: ['geometry'], description: '压缩方式，仅允许 geometry' },
+            bake: { type: 'boolean', description: '是否烘焙' },
+            delight: { type: 'boolean', description: '是否去光照，仅 v3.5 支持设为 true' },
+            texture_prompt: {
+              type: 'object',
+              description:
+                '贴图提示词：text（≤1024 字符）/ image（单张公网 HTTPS 图片 URL）/ images（恰好 4 张公网 HTTPS 图片 URL）三者必选其一；style_image（公网 HTTPS URL）只能搭配 text 使用'
+            }
+          },
+          required: ['input']
+        }
+      },
+      {
+        name: 'decimate_mesh_3d',
+        description:
+          '重拓扑/减面：降低 3D 模型面数，提交 TriPo 后处理任务；提交后用 generation_3d_task_query 查询进度',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            input: { type: 'string', description: '待处理模型的公网 HTTPS URL（必填）' },
+            model: {
+              type: 'string',
+              description:
+                '公开模型：Tripo-Retopology-v2.0（默认）/ Tripo-Retopology-v1.0；bake 与 part_names 仅 v2.0 支持'
+            },
+            face_limit: { type: 'integer', description: '目标面数，必须大于 0（必填）' },
+            quad: { type: 'boolean', description: '是否生成四边形面' },
+            bake: { type: 'boolean', description: '是否烘焙，仅 v2.0 支持' },
+            part_names: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '需要处理的部件名列表，仅 v2.0 支持'
+            }
+          },
+          required: ['input', 'face_limit']
+        }
+      },
+      {
+        name: 'segment_mesh_3d',
+        description:
+          '网格分割：按部件拆分 3D 模型网格，提交 TriPo 后处理任务；提交后用 generation_3d_task_query 查询进度',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            input: { type: 'string', description: '待处理模型的公网 HTTPS URL（必填）' },
+            model: {
+              type: 'string',
+              description:
+                '公开模型：Tripo-Segment-v2.0 / Tripo-Segment-v1.0（默认）；粒度/连通域/参考图仅 v2.0 支持'
+            },
+            segmentation_granularity: {
+              type: 'string',
+              enum: ['simple', 'balanced', 'detailed'],
+              description: '分割粒度，仅 v2.0 支持；不能与 ref_image 同时使用'
+            },
+            split_by_connectivity: {
+              type: 'boolean',
+              description: '按连通域拆分，仅 v2.0 支持；不能与 ref_image 同时使用'
+            },
+            ref_image: {
+              type: 'string',
+              description: '公网 HTTPS 参考图 URL，仅 v2.0 支持；不能与粒度/连通域参数同时使用'
+            }
+          },
+          required: ['input']
+        }
+      },
+      {
+        name: 'rig_check_3d',
+        description:
+          '绑骨检测：检测模型是否可绑骨及建议的骨架类型（免费任务，无模型参数）；结果见任务查询返回的 riggable / rig_type',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            input: {
+              type: 'string',
+              description: '公网 HTTPS GLB URL（必填）；URL 路径带扩展名时必须是 .glb'
+            }
+          },
+          required: ['input']
+        }
+      },
+      {
+        name: 'rig_model_3d',
+        description:
+          '绑骨：为 3D 模型绑定骨骼，提交 TriPo 后处理任务；提交后用 generation_3d_task_query 查询进度',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            input: { type: 'string', description: '待处理模型的公网 HTTPS URL（必填）' },
+            model: {
+              type: 'string',
+              description:
+                '公开模型：Tripo-Rigging-v2.5 / Tripo-Rigging-v1.0（默认，仅支持 biped）'
+            },
+            rig_type: {
+              type: 'string',
+              enum: ['biped', 'quadruped', 'hexapod', 'octopod', 'avian', 'serpentine', 'aquatic'],
+              description: '骨架类型；v1.0 仅支持 biped'
+            },
+            spec: { type: 'string', enum: ['tripo', 'mixamo'], description: '骨架规范' },
+            out_format: { type: 'string', enum: ['glb', 'fbx'], description: '输出格式' }
+          },
+          required: ['input']
+        }
+      },
+      {
         name: 'generation_3d_task_query',
-        description: '查询 3D 生成任务状态和结果 URL（单次查询，不轮询）',
+        description: '查询 3D 生成/后处理任务状态和结果 URL（单次查询，不轮询）',
         inputSchema: {
           type: 'object',
           properties: {
             task_id: {
               type: 'string',
-              description: '任务 ID（三个 3D 提交工具返回）'
+              description: '任务 ID（3D 生成/后处理提交工具返回）'
             }
           },
           required: ['task_id']
@@ -1868,6 +2432,16 @@ async function dispatch(
             output = await generateImageToModel3D(service, args)
           } else if (toolName === 'multiview_to_model_3d') {
             output = await generateMultiviewToModel3D(service, args)
+          } else if (toolName === 'texture_model_3d') {
+            output = await postProcessTexture(service, args)
+          } else if (toolName === 'decimate_mesh_3d') {
+            output = await postProcessDecimate(service, args)
+          } else if (toolName === 'segment_mesh_3d') {
+            output = await postProcessSegment(service, args)
+          } else if (toolName === 'rig_check_3d') {
+            output = await postProcessRigCheck(service, args)
+          } else if (toolName === 'rig_model_3d') {
+            output = await postProcessRig(service, args)
           } else if (toolName === 'generation_3d_task_query') {
             const taskId = typeof args.task_id === 'string' ? args.task_id.trim() : ''
             if (!taskId) {

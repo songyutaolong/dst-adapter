@@ -5,6 +5,7 @@ import {
   getModel,
   markEnabled,
   enableModel as markModelEnabled,
+  disableModel as markModelDisabled,
   listProviders,
   getMcpConnectionInfo,
   markMcpServiceEnabled
@@ -96,6 +97,28 @@ export async function enableModel(app: AppId, modelId: string): Promise<ApplyRes
   if (!result.ok) return result
   markModelEnabled(modelId, app)
   return result
+}
+
+/** 停用某个模型：从应用配置中移除（支持多模型的应用），并更新本机标记。 */
+export async function disableModel(modelId: string): Promise<ApplyResult> {
+  const model = getModel(modelId)
+  if (!model) {
+    return { ok: false, message: '模型不存在' }
+  }
+
+  const adapter = getAdapter(model.app)
+  if (adapter.implemented && adapter.removeModel) {
+    const detect = await adapter.detect()
+    if (detect.installed) {
+      const result = await adapter.removeModel(model.modelId)
+      if (!result.ok) return result
+      markModelDisabled(modelId)
+      return result
+    }
+  }
+
+  markModelDisabled(modelId)
+  return { ok: true, message: '模型已停用' }
 }
 
 /** 将内置 MCP 配置合并进当前应用，或从应用中移除。 */
