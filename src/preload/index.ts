@@ -4,6 +4,7 @@ import type {
   AppInfo,
   AppSettings,
   ApplyResult,
+  AssetRecord,
   GatewayMeResult,
   Provider,
   SpeedTestResult,
@@ -12,12 +13,15 @@ import type {
   ModelConfig,
   Prompt,
   SessionMeta,
+  SessionArchiveState,
   SessionMessagesOptions,
   SessionMessagesPage,
+  SettingsRewriteEvent,
   SkillCatalogResult,
   SyncModelsResult,
   UpdateState
 } from '../shared/types'
+import type { PromptTemplate } from '../shared/prompts'
 
 export interface McpConnectionInfo {
   text: string
@@ -66,6 +70,14 @@ const api = {
     ipcRenderer.on('deeplink:imported', listener)
     return () => {
       ipcRenderer.removeListener('deeplink:imported', listener)
+    }
+  },
+  onSettingsRewrite: (cb: (result: SettingsRewriteEvent) => void) => {
+    const listener = (_: Electron.IpcRendererEvent, result: SettingsRewriteEvent) =>
+      cb(result)
+    ipcRenderer.on('settings:rewrite', listener)
+    return () => {
+      ipcRenderer.removeListener('settings:rewrite', listener)
     }
   },
   // MCP Services
@@ -132,13 +144,41 @@ const api = {
     ipcRenderer.invoke('sessions:messages', app, sessionId, opts),
   deleteSession: (app: AppId, sessionId: string): Promise<ApplyResult> =>
     ipcRenderer.invoke('sessions:delete', app, sessionId),
-  // Prompts（个人提示词）
+  // Session Archive（会话归档 → AI 能力平台）
+  getSessionArchiveState: (): Promise<SessionArchiveState> =>
+    ipcRenderer.invoke('sessions:archiveState'),
+  runSessionArchiveNow: (): Promise<SessionArchiveState> =>
+    ipcRenderer.invoke('sessions:archiveNow'),
+  onSessionArchiveUpdated: (cb: (state: SessionArchiveState) => void) => {
+    const listener = (_: Electron.IpcRendererEvent, s: SessionArchiveState) => cb(s)
+    ipcRenderer.on('sessions:archive-updated', listener)
+    return () => {
+      ipcRenderer.removeListener('sessions:archive-updated', listener)
+    }
+  },
+  // Prompts（提示词管理：个人提示词 + 公司模板，均走 AI 能力平台）
   listPrompts: (): Promise<Prompt[]> => ipcRenderer.invoke('prompts:list'),
+  listPromptTemplates: (): Promise<PromptTemplate[]> =>
+    ipcRenderer.invoke('prompts:listTemplates'),
   createPrompt: (input: Omit<Prompt, 'id' | 'createdAt' | 'updatedAt'>): Promise<Prompt> =>
     ipcRenderer.invoke('prompts:create', input),
   updatePrompt: (id: string, patch: Partial<Omit<Prompt, 'id' | 'createdAt'>>): Promise<Prompt> =>
     ipcRenderer.invoke('prompts:update', id, patch),
   deletePrompt: (id: string): Promise<boolean> => ipcRenderer.invoke('prompts:delete', id),
+  // Assets（生成记录）
+  listAssetRecords: (): Promise<AssetRecord[]> => ipcRenderer.invoke('assets:list'),
+  retryAssetRecord: (id: string): Promise<AssetRecord> => ipcRenderer.invoke('assets:retry', id),
+  deleteAssetRecord: (id: string): Promise<boolean> => ipcRenderer.invoke('assets:delete', id),
+  signAssetRecordUrl: (
+    id: string
+  ): Promise<{ url: string; expiresAt: string }> => ipcRenderer.invoke('assets:signUrl', id),
+  onAssetsChanged: (cb: () => void) => {
+    const listener = () => cb()
+    ipcRenderer.on('assets:changed', listener)
+    return () => {
+      ipcRenderer.removeListener('assets:changed', listener)
+    }
+  },
   // Auto Update
   getUpdateState: (): Promise<UpdateState> => ipcRenderer.invoke('update:getState'),
   checkForUpdate: (userInitiated = false): Promise<UpdateState> =>

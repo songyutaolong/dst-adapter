@@ -1,13 +1,4 @@
-export type AppId =
-  | 'workbuddy'
-  | 'codex'
-  | 'cursor'
-  | 'continue'
-  | 'cline'
-  | 'cherry-studio'
-  | 'claude-code'
-  | 'claude-desktop'
-  | 'vscode'
+export type AppId = 'workbuddy' | 'codex' | 'claude-code'
 
 export interface Provider {
   id: string
@@ -163,10 +154,20 @@ export interface SessionMeta {
 
 export type SessionMessageRole = 'user' | 'assistant' | 'tool'
 
+/** 工具调用结构化记录（消息的附加信息，平台 tool_calls 字段）。 */
+export interface SessionToolCall {
+  name: string
+  args?: string
+  result?: string
+  status?: string
+}
+
 export interface SessionMessage {
   role: SessionMessageRole
   text: string
   timestamp?: string
+  /** 结构化工具调用（展示仍用 text；平台上报时随消息携带） */
+  toolCalls?: SessionToolCall[]
 }
 
 /** 会话消息读取选项：不传 cursor 时返回最新的一页 */
@@ -187,6 +188,23 @@ export interface SessionMessagesPage {
   total?: number
 }
 
+/** 会话归档最近一次运行结果（界面展示用） */
+export interface SessionArchiveRun {
+  at: string
+  ok: boolean
+  message: string
+  uploaded: number
+  failed: number
+}
+
+/** 会话归档状态：定期把本地会话上报公司 AI 能力平台（增量，同一会话整体覆盖） */
+export interface SessionArchiveState {
+  enabled: boolean
+  /** 是否已配置 AI 能力平台（Base URL/Key/Secret 齐备） */
+  platformConfigured: boolean
+  lastRun: SessionArchiveRun | null
+}
+
 export interface SyncModelsResult {
   ok: boolean
   message: string
@@ -195,14 +213,96 @@ export interface SyncModelsResult {
   lastSyncAt?: string
 }
 
-/** 提示词管理：用户自己维护的个人提示词（"使用"即复制到系统剪贴板） */
+/** 提示词管理：个人提示词（存于 AI 能力平台，"使用"即复制到系统剪贴板） */
 export interface Prompt {
   id: string
   name: string
   /** 提示词正文（多行） */
   content: string
+  /** 标签（平台侧随提示词维护） */
+  tags?: string[]
   createdAt: string
   updatedAt: string
+}
+
+/** 生成记录：内置 MCP 工具产出的图片/视频/3D 资产自动归档（下载→上传云存储→记录元数据） */
+export type AssetKind = 'image' | 'video' | 'model3d'
+
+export type AssetRecordStatus =
+  | 'pending' // 视频/3D 任务已提交，等待结果
+  | 'uploading' // 已拿到资产（内存/本地缓存），上传中
+  | 'completed' // 已归档到云存储
+  | 'upload_failed' // 下载或上传失败，可手动重试
+  | 'failed' // 上游生成任务失败，不可重试
+  | 'expired' // 轮询超时放弃
+
+export interface AssetRecordIdentity {
+  userId: number
+  username: string
+  displayName: string
+  orgId: number
+  orgName: string
+}
+
+export interface AssetRecordCloud {
+  provider: 'cos' | 'oss'
+  bucket: string
+  key: string
+  region?: string
+  uploadedAt: string
+  size: number
+  contentType: string
+  /** 逻辑键：对象 key 去掉组织 path_prefix 后的业务路径，供 AI 能力平台 files/import 定位对象 */
+  logicalKey?: string
+}
+
+/** AI 能力平台数据归档结果（files/import 返回的文件 id 与后台状态） */
+export interface AssetRecordArchive {
+  /** files/import 返回的平台文件 id */
+  fileId: string
+  /** 平台侧后台状态：pending（复制中）→ ready */
+  status: string
+  /** 发起导入的时间 */
+  importedAt: string
+  error?: string
+}
+
+export interface AssetRecord {
+  id: string
+  /** 同一次工具调用产出多张图时共享的调用 ID */
+  callId: string
+  kind: AssetKind
+  toolName: string
+  /** 调用方（WorkBuddy / Codex / UA 片段），识别失败为 unknown */
+  sourceApp: string
+  /** 提交时捕获的提示词；3D 后处理工具为合成的操作描述 */
+  prompt: string
+  /** 生成来源会话（工具入参携带的 session_id，格式如 workbuddy:<uuid>）；平台数据归档时带上 */
+  sessionId?: string
+  /** 清洗后的入参（超长/base64 字段已替换为占位符） */
+  params: Record<string, unknown>
+  model?: string
+  identity: AssetRecordIdentity | null
+  status: AssetRecordStatus
+  taskId?: string
+  /** 上游任务状态原文 */
+  taskStatus?: string
+  failReason?: string
+  /** 上游结果 URL（下载源） */
+  resultUrl?: string
+  fileName: string
+  mimeType?: string
+  size?: number
+  /** 失败重试用的本地缓存文件（上传成功后删除） */
+  localBufferPath?: string
+  cloud?: AssetRecordCloud
+  /** AI 能力平台数据归档结果（云盘上传完成后调用 files/import 登记，失败时 status=failed） */
+  archive?: AssetRecordArchive
+  error?: string
+  attempts: number
+  createdAt: string
+  updatedAt: string
+  completedAt?: string
 }
 
 /** OSS Skill 仓储中的可安装包；凭据和签名 URL 不进入渲染进程。 */
@@ -266,7 +366,7 @@ export const BUILTIN_MCP_VIDEO_DEFAULTS = {
   type: 'video-generation' as McpServiceType,
   provider: 'dst' as McpProvider,
   baseUrl: DEFAULT_PROVIDER_ENDPOINT,
-  models: ['doubao-seedance-2.0', 'doubao-seedance-2-0-260128'],
+  models: ['doubao-seedance-2.0', 'wan3.0-video'],
   resolutions: ['480p', '720p', '1080p', '4K'],
   ratios: ['21:9', '16:9', '4:3', '1:1', '3:4', '9:16', 'adaptive'],
   fps: [24, 60],
@@ -319,10 +419,16 @@ export interface AppSettings {
   providerApiKey: string
   providerWireApi: 'responses' | 'chat_completions'
   providerVendor: string
+  /** AI能力平台配置（先实现配置保存，具体使用后续实现） */
+  assetBaseUrl: string
+  assetKey: string
+  assetSecret: string
+  /** 每应用路由开关：是否经由 dstAdapter 本地代理做协议转换（浅合并，须整体替换）。 */
+  routing: Partial<Record<AppId, boolean>>
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
-  launchAtLogin: false,
+  launchAtLogin: true,
   backupKeep: 10,
   locale: 'zh-CN',
   workBuddyPath: '',
@@ -331,7 +437,34 @@ export const DEFAULT_SETTINGS: AppSettings = {
   providerEndpoint: DEFAULT_PROVIDER_ENDPOINT,
   providerApiKey: '',
   providerWireApi: 'chat_completions',
-  providerVendor: 'dst'
+  providerVendor: 'dst',
+  assetBaseUrl: '',
+  assetKey: '',
+  assetSecret: '',
+  routing: { codex: true }
+}
+
+/** 路由协议转换支持表：按应用声明转换方向与是否已可用。 */
+export interface RoutingConversionSupport {
+  direction: 'responses→chat' | 'chat→responses'
+  available: boolean
+}
+
+export const ROUTING_CONVERSION_SUPPORT: Partial<Record<AppId, RoutingConversionSupport>> = {
+  codex: { direction: 'responses→chat', available: true },
+  workbuddy: { direction: 'chat→responses', available: false }
+}
+
+/** 已支持协议转换路由的应用（协议/路由变更后需要重写配置的范围）。 */
+export const ROUTING_SUPPORTED_APPS: AppId[] = (
+  Object.keys(ROUTING_CONVERSION_SUPPORT) as AppId[]
+).filter((app) => Boolean(ROUTING_CONVERSION_SUPPORT[app]?.available))
+
+/** 路由/协议变更后重写应用配置的结果事件（经 IPC 推送到渲染层）。 */
+export interface SettingsRewriteEvent {
+  app: AppId
+  ok: boolean
+  message: string
 }
 
 /** 应用自动更新状态（electron-updater 状态机的精简映射） */
@@ -372,39 +505,9 @@ export const APP_META: Record<
     implemented: true,
     downloadUrl: 'https://openai.com/zh-Hans-CN/codex/'
   },
-  cursor: {
-    name: 'Cursor',
-    implemented: false,
-    downloadUrl: 'https://www.cursor.com/downloads'
-  },
-  continue: {
-    name: 'Continue',
-    implemented: false,
-    downloadUrl: 'https://www.continue.dev/'
-  },
-  cline: {
-    name: 'Cline',
-    implemented: false,
-    downloadUrl: 'https://cline.bot/'
-  },
-  'cherry-studio': {
-    name: 'Cherry Studio',
-    implemented: false,
-    downloadUrl: 'https://www.cherry-ai.com/'
-  },
   'claude-code': {
     name: 'Claude Code',
     implemented: false,
     downloadUrl: 'https://www.anthropic.com/claude-code'
-  },
-  'claude-desktop': {
-    name: 'Claude Desktop',
-    implemented: false,
-    downloadUrl: 'https://claude.ai/download'
-  },
-  vscode: {
-    name: 'VS Code',
-    implemented: false,
-    downloadUrl: 'https://code.visualstudio.com/download'
   }
 }

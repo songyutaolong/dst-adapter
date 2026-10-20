@@ -27,10 +27,4 @@ function stub(id: AppId): AppAdapter {
   }
 }
 
-export const cursorAdapter = stub('cursor')
-export const continueAdapter = stub('continue')
-export const clineAdapter = stub('cline')
-export const cherryStudioAdapter = stub('cherry-studio')
 export const claudeCodeAdapter = stub('claude-code')
-export const claudeDesktopAdapter = stub('claude-desktop')
-export const vscodeAdapter = stub('vscode')

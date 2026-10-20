@@ -12,7 +12,8 @@ import type {
 import {
   APP_META,
   BUILTIN_MCP_UEMCP_ID,
-  DEFAULT_PROVIDER_ENDPOINT
+  DEFAULT_PROVIDER_ENDPOINT,
+  ROUTING_SUPPORTED_APPS
 } from '../shared/types'
 import { listAdapters, getAdapter } from './adapters'
 import {
@@ -36,23 +37,37 @@ import {
   updateModel,
   getEnabledModel,
   saveModelsFromApi,
-  getLastSyncAt,
-  listPrompts,
-  createPrompt,
-  updatePrompt,
-  deletePrompt
+  getLastSyncAt
 } from './store'
+import {
+  listPlatformMyPrompts,
+  createPlatformMyPrompt,
+  updatePlatformMyPrompt,
+  deletePlatformMyPrompt,
+  listPlatformPromptTemplates
+} from './prompts'
 import {
   enableProvider,
   enableModel as enableModelForApp,
   disableModel as disableModelForApp,
   applyMcpToApp,
-  ensureMcpToApp
+  ensureMcpToApp,
+  rewriteEnabledProviders
 } from './switcher'
 import { fetchMe, fetchModels, speedTest } from './speedtest'
 import { rebuildTrayMenu } from './tray'
 import { parseDeepLink } from '../shared/url'
 import { launchMcpService, stopMcpService as stopMcpProcess, getMcpRuntime } from './mcp/launcher'
+import {
+  listAssetRecords,
+  retryAssetRecord,
+  signAssetRecordUrl,
+  deleteAssetRecord
+} from './assets/archive'
+import {
+  getSessionArchiveState,
+  runSessionArchiveNow
+} from './sessionArchive'
 import {
   checkForUpdates,
   downloadUpdate,
@@ -60,6 +75,7 @@ import {
   quitAndInstall
 } from './update'
 import { applyLaunchAtLogin } from './login'
+import { stopCodexProxy } from './codex/proxy'
 
 export function registerIpc(getMainWindow: () => BrowserWindow | null): void {
   ipcMain.handle('apps:list', async () => {
@@ -130,10 +146,36 @@ export function registerIpc(getMainWindow: () => BrowserWindow | null): void {
   })
 
   ipcMain.handle('settings:get', () => getSettings())
-  ipcMain.handle('settings:update', (_e, patch) => {
+  ipcMain.handle('settings:update', async (_e, patch) => {
+    const prev = getSettings()
+    // 在 updateSettings 内部的 syncSharedProviders 强制启用共享 Provider 之前，
+    // 快照"本来就已启用"的应用：自动重写只覆盖这些，避免改写刻意停用的应用配置
+    const rewriteTargets = ROUTING_SUPPORTED_APPS.filter((app) =>
+      listProviders(app).some((p) => p.enabled)
+    )
     const next = updateSettings(patch)
     if (typeof patch?.launchAtLogin === 'boolean') {
       applyLaunchAtLogin(patch.launchAtLogin)
+    }
+    // 路由开关或上游协议变化：自动重写受影响应用的配置，保持 base_url/wire_api 同步
+    const routingChanged =
+      patch &&
+      typeof patch.routing === 'object' &&
+      JSON.stringify(prev.routing) !== JSON.stringify(next.routing)
+    const wireApiChanged =
+      patch?.providerWireApi && patch.providerWireApi !== prev.providerWireApi
+    if (routingChanged || wireApiChanged) {
+      const results = await rewriteEnabledProviders(rewriteTargets)
+      const win = getMainWindow()
+      for (const r of results) {
+        if (!r.ok && win && !win.isDestroyed()) {
+          win.webContents.send('settings:rewrite', r)
+        }
+      }
+      // 兜底：路由不再需要代理时确保停掉（覆盖无启用 Provider 的残余场景）
+      if (!(next.routing?.codex ?? true) || next.providerWireApi === 'responses') {
+        void stopCodexProxy()
+      }
     }
     return next
   })
@@ -350,24 +392,41 @@ export function registerIpc(getMainWindow: () => BrowserWindow | null): void {
     return result
   })
 
-  // ── Prompts（个人提示词） ──
+  // ── Session Archive（会话归档 → AI 能力平台）──
+  ipcMain.handle('sessions:archiveState', () => getSessionArchiveState())
 
-  ipcMain.handle('prompts:list', () => listPrompts())
+  ipcMain.handle('sessions:archiveNow', async () => runSessionArchiveNow())
+
+  // ── Prompts（提示词管理：个人提示词 + 公司模板，均走 AI 能力平台） ──
+
+  ipcMain.handle('prompts:list', () => listPlatformMyPrompts())
+
+  ipcMain.handle('prompts:listTemplates', () => listPlatformPromptTemplates())
 
   ipcMain.handle(
     'prompts:create',
-    (_e, input: Omit<Prompt, 'id' | 'createdAt' | 'updatedAt'>) => createPrompt(input)
+    (_e, input: Omit<Prompt, 'id' | 'createdAt' | 'updatedAt'>) => createPlatformMyPrompt(input)
   )
 
   ipcMain.handle(
     'prompts:update',
-    (_e, id: string, patch: Partial<Omit<Prompt, 'id' | 'createdAt'>>) => updatePrompt(id, patch)
+    (_e, id: string, patch: Partial<Omit<Prompt, 'id' | 'createdAt'>>) =>
+      updatePlatformMyPrompt(id, patch)
   )
 
-  ipcMain.handle('prompts:delete', (_e, id: string) => {
-    deletePrompt(id)
+  ipcMain.handle('prompts:delete', (_e, id: string) => deletePlatformMyPrompt(id))
+
+  // ── Assets（生成记录）──
+  ipcMain.handle('assets:list', () => listAssetRecords())
+
+  ipcMain.handle('assets:retry', (_e, id: string) => retryAssetRecord(id))
+
+  ipcMain.handle('assets:delete', (_e, id: string) => {
+    deleteAssetRecord(id)
     return true
   })
+
+  ipcMain.handle('assets:signUrl', (_e, id: string) => signAssetRecordUrl(id))
 
   ipcMain.handle(
     'models:sync',

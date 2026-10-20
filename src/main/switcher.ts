@@ -1,4 +1,4 @@
-import type { AppId, ApplyResult, Provider } from '../shared/types'
+import type { AppId, ApplyResult, Provider, SettingsRewriteEvent } from '../shared/types'
 import { getAdapter } from './adapters'
 import {
   getProvider,
@@ -58,6 +58,36 @@ export async function enableProviderObject(
   return enableProvider(provider.id)
 }
 
+/**
+ * 路由/上游协议变化后：把已启用 Provider 的最新配置重写进应用。
+ * 轻量路径，不重跑 detect/markEnabled；异常在此吞掉，保证设置保存本身不失败。
+ */
+export async function rewriteEnabledProviders(
+  apps: AppId[]
+): Promise<SettingsRewriteEvent[]> {
+  const results: SettingsRewriteEvent[] = []
+  for (const app of apps) {
+    const adapter = getAdapter(app)
+    if (!adapter.implemented) continue
+    const provider = listProviders(app).find((p) => p.enabled)
+    if (!provider) {
+      results.push({ app, ok: true, message: '无启用 Provider，跳过重写' })
+      continue
+    }
+    try {
+      const r = await adapter.writeLive(provider)
+      results.push({ app, ok: r.ok, message: r.message })
+    } catch (err) {
+      results.push({
+        app,
+        ok: false,
+        message: err instanceof Error ? err.message : String(err)
+      })
+    }
+  }
+  return results
+}
+
 /** 启用某个模型：将当前应用的 Provider 配置 + 该模型写入应用配置文件。 */
 export async function enableModel(app: AppId, modelId: string): Promise<ApplyResult> {
   const model = getModel(modelId)
@@ -67,7 +97,9 @@ export async function enableModel(app: AppId, modelId: string): Promise<ApplyRes
   if (model.app !== app) {
     return { ok: false, message: '模型不属于当前应用' }
   }
-  const provider = listProviders(app)[0]
+  // 与 launch 一致优先取已启用 Provider；未启用过时回退第一个
+  const providers = listProviders(app)
+  const provider = providers.find((item) => item.enabled) ?? providers[0]
   if (!provider) {
     return { ok: false, message: '请先配置 Provider 再启用模型' }
   }
@@ -93,7 +125,8 @@ export async function enableModel(app: AppId, modelId: string): Promise<ApplyRes
     supportsImages: model.config?.supportsImages ?? model.supportsVision ?? false,
     supportsReasoning: model.config?.supportsReasoning ?? false
   }
-  const result = await adapter.writeLive(providerForWrite)
+  // activeModel：显式把该模型设为 Codex 当前激活模型（同时加入 catalog）
+  const result = await adapter.writeLive(providerForWrite, { activeModel: model.modelId })
   if (!result.ok) return result
   markModelEnabled(modelId, app)
   return result

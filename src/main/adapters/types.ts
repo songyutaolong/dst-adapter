@@ -28,7 +28,11 @@ export interface AppAdapter {
   implemented: boolean
   detect(): Promise<DetectResult>
   readLive(): Promise<unknown>
-  writeLive(provider: Provider): Promise<ApplyResult>
+  /**
+   * opts.activeModel：调用方显式激活的模型（如模型页点"启用"）；
+   * 不传时保留应用内用户已选择的模型，避免每次写入都重置。
+   */
+  writeLive(provider: Provider, opts?: { activeModel?: string }): Promise<ApplyResult>
   /** 从应用配置中移除指定模型（支持多模型并存的应用） */
   removeModel?(modelId: string): Promise<ApplyResult>
   /** 合并/移除 MCP 服务配置到目标应用 */

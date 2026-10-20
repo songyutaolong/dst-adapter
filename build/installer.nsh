@@ -22,6 +22,8 @@
 !macro customInstall
   Delete "$INSTDIR\大算头适配器.exe"
   Delete "$INSTDIR\Uninstall 大算头适配器.exe"
+  Delete "$INSTDIR\dst adapter.exe"
+  Delete "$INSTDIR\Uninstall dst adapter.exe"
   !insertmacro DST_ADAPTER_CLEAN_LEGACY_SHORTCUTS
 !macroend
 

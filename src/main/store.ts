@@ -2,7 +2,7 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import { randomUUID } from 'crypto'
-import type { AppId, AppSettings, Provider, McpService, Model, ModelInfo, ModelConfig, Prompt } from '../shared/types'
+import type { AppId, AppSettings, Provider, McpService, Model, ModelInfo, ModelConfig } from '../shared/types'
 import {
   DEFAULT_PROVIDER_ENDPOINT,
   DEFAULT_SETTINGS,
@@ -27,11 +27,10 @@ export interface DataStore {
   providers: Provider[]
   mcpServices: McpService[]
   models: Model[]
-  prompts: Prompt[]
   lastSyncAt?: string
 }
 
-function dataDir(): string {
+export function dataDir(): string {
   return path.join(os.homedir(), '.dst-adapter')
 }
 
@@ -44,18 +43,17 @@ export function backupsDir(app?: string): string {
   return app ? path.join(base, app) : base
 }
 
-function ensureDir(dir: string): void {
+export function ensureDir(dir: string): void {
   fs.mkdirSync(dir, { recursive: true })
 }
 
 function emptyStore(): DataStore {
   return {
     version: 1,
-    settings: { ...DEFAULT_SETTINGS },
+    settings: { ...DEFAULT_SETTINGS, routing: { ...DEFAULT_SETTINGS.routing } },
     providers: [],
     mcpServices: [],
     models: [],
-    prompts: [],
     lastSyncAt: undefined
   }
 }
@@ -89,7 +87,7 @@ function migrateLegacyEndpoints(store: DataStore): boolean {
   return changed
 }
 
-function atomicWriteJson(filePath: string, data: unknown): void {
+export function atomicWriteJson(filePath: string, data: unknown): void {
   ensureDir(path.dirname(filePath))
   const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf-8')
@@ -125,11 +123,15 @@ export function loadStore(): DataStore {
     }
     const store: DataStore = {
       version: parsed.version ?? 1,
-      settings: { ...DEFAULT_SETTINGS, ...(parsed.settings || {}) },
+      settings: {
+        ...DEFAULT_SETTINGS,
+        ...(parsed.settings || {}),
+        // routing 是嵌套对象，浅合并会与 DEFAULT_SETTINGS 共享引用，这里复制隔离
+        routing: { ...(parsed.settings?.routing ?? DEFAULT_SETTINGS.routing) }
+      },
       providers: Array.isArray(parsed.providers) ? parsed.providers : [],
       mcpServices,
       models: Array.isArray(parsed.models) ? parsed.models : [],
-      prompts: Array.isArray(parsed.prompts) ? parsed.prompts : [],
       lastSyncAt: parsed.lastSyncAt
     }
     if (migrateLegacyEndpoints(store)) saveStore(store)
@@ -826,18 +828,11 @@ export function enableModel(id: string, app: AppId): Model {
   const store = loadStore()
   const now = new Date().toISOString()
 
-  // Codex 通过 config.toml 指定唯一活动模型，保持互斥；
-  // 其余应用（如 WorkBuddy 的 models.json 数组）支持多模型同时启用。
-  if (app === 'codex') {
-    for (const m of store.models) {
-      if (m.app === app) {
-        m.enabled = m.id === id
-        m.updatedAt = now
-      }
-    }
-  }
-
-  const target = store.models.find((m) => m.id === id)!
+  // 所有应用均允许多模型同时启用；Codex 通过 model_catalog_json
+  // 支持在应用内自由切换，"当前激活模型"由 config.toml 的 model 键表达，
+  // 与此处的 enabled 标记解耦。
+  const target = store.models.find((m) => m.id === id)
+  if (!target || target.app !== app) throw new Error('模型不存在')
   target.enabled = true
   target.updatedAt = now
   saveStore(store)
@@ -863,54 +858,4 @@ export function getEnabledModel(app: AppId): Model | undefined {
 
 export function getLastSyncAt(): string | undefined {
   return loadStore().lastSyncAt
-}
-
-// ── Prompts（个人提示词） ──
-
-function validatePromptFields(name: unknown, content: unknown): { name: string; content: string } {
-  const n = typeof name === 'string' ? name.trim() : ''
-  const c = typeof content === 'string' ? content.trim() : ''
-  if (!n) throw new Error('请填写提示词名称')
-  if (n.length > 50) throw new Error('提示词名称不能超过 50 个字符')
-  if (!c) throw new Error('请填写提示词内容')
-  if (c.length > 5000) throw new Error('提示词内容不能超过 5000 个字符')
-  return { name: n, content: c }
-}
-
-export function listPrompts(): Prompt[] {
-  return loadStore().prompts
-}
-
-export function createPrompt(input: Omit<Prompt, 'id' | 'createdAt' | 'updatedAt'>): Prompt {
-  const store = loadStore()
-  const { name, content } = validatePromptFields(input.name, input.content)
-  const now = new Date().toISOString()
-  const prompt: Prompt = { id: randomUUID(), name, content, createdAt: now, updatedAt: now }
-  store.prompts.push(prompt)
-  saveStore(store)
-  return prompt
-}
-
-export function updatePrompt(id: string, patch: Partial<Omit<Prompt, 'id' | 'createdAt'>>): Prompt {
-  const store = loadStore()
-  const idx = store.prompts.findIndex((p) => p.id === id)
-  if (idx < 0) throw new Error('Prompt not found')
-  const merged = { ...store.prompts[idx], ...patch }
-  const { name, content } = validatePromptFields(merged.name, merged.content)
-  store.prompts[idx] = {
-    ...store.prompts[idx],
-    name,
-    content,
-    id,
-    updatedAt: new Date().toISOString()
-  }
-  saveStore(store)
-  return store.prompts[idx]
-}
-
-export function deletePrompt(id: string): void {
-  const store = loadStore()
-  if (!store.prompts.some((p) => p.id === id)) throw new Error('Prompt not found')
-  store.prompts = store.prompts.filter((p) => p.id !== id)
-  saveStore(store)
 }

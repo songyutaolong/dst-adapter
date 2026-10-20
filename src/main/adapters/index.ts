@@ -1,28 +1,10 @@
 import type { AppAdapter } from './types'
 import { workbuddyAdapter } from './workbuddy'
 import { codexAdapter } from './codex'
-import {
-  cherryStudioAdapter,
-  claudeCodeAdapter,
-  claudeDesktopAdapter,
-  clineAdapter,
-  continueAdapter,
-  cursorAdapter,
-  vscodeAdapter
-} from './stubs'
+import { claudeCodeAdapter } from './stubs'
 import type { AppId } from '../../shared/types'
 
-const adapters: AppAdapter[] = [
-  workbuddyAdapter,
-  codexAdapter,
-  cursorAdapter,
-  continueAdapter,
-  clineAdapter,
-  cherryStudioAdapter,
-  claudeCodeAdapter,
-  claudeDesktopAdapter,
-  vscodeAdapter
-]
+const adapters: AppAdapter[] = [workbuddyAdapter, codexAdapter, claudeCodeAdapter]
 
 export function getAdapter(app: AppId): AppAdapter {
   const found = adapters.find((a) => a.id === app)

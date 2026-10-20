@@ -1,5 +1,4 @@
 import http from 'http'
-import { createHash, createHmac, randomUUID } from 'crypto'
 import { readFile, stat } from 'fs/promises'
 import path from 'path'
 import { isIP, type AddressInfo } from 'net'
@@ -10,6 +9,14 @@ import {
   BUILTIN_MCP_VIDEO_DEFAULTS,
   MCP_DEFAULT_PORT
 } from '../../shared/types'
+import {
+  guessContentType,
+  MAX_FILE_UPLOAD_SIZE,
+  parsePresignedExpires,
+  sanitizeFileName,
+  uploadToCloudStorage,
+  type CloudStorageProvider
+} from '../assets/cloudStorage'
 
 /**
  * Streamable HTTP MCP Server（单端点）
@@ -20,8 +27,8 @@ import {
  * - 工具：
  *   - image_generation 文生图（模型 ID 由请求参数 model 决定）
  *   - image_editing    图生图/编辑（输入图片 Base64 + 编辑指令，支持多参考图：image 可传 string 或多张 string[]）
- *   - video_generation 文生/参考内容生视频（提交任务，返回 task_id）
- *   - video_from_image 参考内容生视频（参考图、帧控制、参考视频、参考音频）
+ *   - video_generation 文生/参考内容生视频（提交任务，返回 task_id；doubao-seedance 与 wan3 系列，后者自动适配 Wan3 media 请求格式）
+ *   - video_from_image 参考内容生视频（参考图、帧控制、参考视频、参考音频；file/link 媒体仅 wan3 系列）
  *   - video_task_query 查询视频生成任务状态（单次查询，不轮询；轮询节奏由调用方控制）
  *   - file_upload      文件上传（返回临时公网访问 URL；支持腾讯 COS / 阿里 OSS）
  *   - text_to_model_3d / image_to_model_3d / multiview_to_model_3d
@@ -54,55 +61,29 @@ interface JsonRpcResponse {
   error?: JsonRpcError
 }
 
-type CloudStorageProvider = 'cos' | 'oss'
-
-interface CloudStorageConfig {
-  organization_id: number
-  provider: CloudStorageProvider
-  bucket: string
-  region?: string
-  endpoint: string
-  path_prefix?: string
-  custom_domain?: string
-  credentials: {
-    secret_id?: string
-    secret_key?: string
-    access_key_id?: string
-    access_key_secret?: string
-  }
+/**
+ * 工具调用钩子：归档等旁路能力挂在 tools/call 成功返回后，
+ * 由外部（index.ts）注入，server 自身不依赖归档模块，避免循环依赖。
+ * 钩子必须自行兜底异常，且不得阻塞工具响应。
+ */
+export interface ToolCallHookContext {
+  service: McpService
+  toolName: string
+  args: Record<string, unknown>
+  /** 工具原始输出（未 JSON 序列化的对象） */
+  output: unknown
+  /** best-effort 识别的调用方（WorkBuddy / Codex / UA 片段），可能为空 */
+  clientName?: string
 }
 
-interface SignedCosUrlInput {
-  method: 'GET' | 'PUT'
-  host: string
-  key: string
-  secretId: string
-  secretKey: string
-  expires: number
-  headers?: Record<string, string>
-  params?: Record<string, string>
+let toolCallHook: ((ctx: ToolCallHookContext) => void) | null = null
+
+export function setToolCallHook(fn: ((ctx: ToolCallHookContext) => void) | null): void {
+  toolCallHook = fn
 }
 
-interface SignedOssUrlInput {
-  method: 'GET' | 'PUT'
-  baseUrl: string
-  bucket: string
-  key: string
-  accessKeyId: string
-  accessKeySecret: string
-  expires: number
-  contentType?: string
-}
-
-interface OssTarget {
-  protocol: string
-  uploadHost: string
-  publicHost: string
-}
-
-const MAX_FILE_UPLOAD_SIZE = 200 * 1024 * 1024
-const MIN_PRESIGNED_EXPIRES = 60
-const MAX_PRESIGNED_EXPIRES = 7 * 24 * 60 * 60
+/** 任务查询只依赖网关连接信息；收窄入参，便于归档轮询器以连接对象直接调用。 */
+export type McpServiceConnection = Pick<McpService, 'baseUrl' | 'apiKey'>
 
 /** 三个 3D 提交工具共用的高级参数说明；真正提交时仍使用三个独立 endpoint。 */
 const THREE_D_METADATA_SCHEMA = {
@@ -140,8 +121,9 @@ const VIDEO_CONTENT_SCHEMA = {
     properties: {
       type: {
         type: 'string',
-        enum: ['text', 'image_url', 'video_url', 'audio_url'],
-        description: '内容类型：text（提示文本）、image_url（图片）、video_url（公网参考视频 URL）、audio_url（公网参考音频 URL）'
+        enum: ['text', 'image_url', 'video_url', 'audio_url', 'file', 'link'],
+        description:
+          '内容类型：text（提示文本）、image_url（图片）、video_url（公网参考视频 URL）、audio_url（公网参考音频 URL）、file（参考文件，仅 wan3 系列）、link（公开网页链接，仅 wan3 系列）'
       },
       text: { type: 'string', description: '文本内容（type=text 时必填）' },
       image_url: {
@@ -159,16 +141,26 @@ const VIDEO_CONTENT_SCHEMA = {
         properties: { url: { type: 'string', description: '互联网可访问的参考音频 URL（type=audio_url 时必填）' } },
         required: ['url']
       },
+      file: {
+        type: 'object',
+        properties: { url: { type: 'string', description: '互联网可访问的参考文件 URL（type=file 时必填，仅 wan3 系列）' } },
+        required: ['url']
+      },
+      link: {
+        type: 'object',
+        properties: { url: { type: 'string', description: '公开网页链接 URL（type=link 时必填，仅 wan3 系列）' } },
+        required: ['url']
+      },
       role: {
         type: 'string',
         enum: ['reference_image', 'first_frame', 'last_frame', 'reference_video', 'reference_audio'],
-        description: '内容角色；video_url 使用 reference_video，audio_url 使用 reference_audio'
+        description: '内容角色；video_url 使用 reference_video，audio_url 使用 reference_audio，file/link 无需 role'
       }
     },
     required: ['type']
   },
   description:
-    '内容数组：支持参考图、首帧（可选尾帧）、互联网可访问的参考视频/音频 URL，以及可选 text 提示；media 类型必须提供至少一项'
+    '内容数组：支持参考图、首帧（可选尾帧）、互联网可访问的参考视频/音频 URL、file/link（仅 wan3 系列），以及可选 text 提示；media 类型必须提供至少一项；wan3 系列的参考视频/音频单段 1-15 秒且总时长不超过 15 秒'
 } as const
 
 export interface McpServerHandle {
@@ -563,6 +555,17 @@ function pickVideoModel(service: McpService, params?: Record<string, unknown>): 
   return supported.includes(requested) ? requested : service.modelId || BUILTIN_MCP_VIDEO_DEFAULTS.models[0]
 }
 
+/**
+ * wan3 系列模型判定（按前缀匹配）：请求体走网关的 Wan3 格式。
+ * wan3.0-video-prime（高速版）暂未加入白名单（隐藏）；恢复时只需加回 BUILTIN_MCP_VIDEO_DEFAULTS.models。
+ */
+function isWan3Model(model: string): boolean {
+  return model.startsWith('wan3.0-video')
+}
+
+/** wan3 支持的分辨率档位（统一参数用小写 p，网关要求大写 P，且无 4K）。 */
+const WAN3_RESOLUTIONS = ['480P', '720P', '1080P'] as const
+
 function isPublicIpv4(host: string): boolean {
   const parts = host.split('.').map(Number)
   if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) return false
@@ -634,16 +637,21 @@ function extractVideoContent(params: Record<string, unknown> | undefined, requir
   return content
 }
 
-function validateVideoContent(value: unknown): unknown[] {
+function validateVideoContent(value: unknown, model?: string): unknown[] {
   if (!Array.isArray(value) || value.length === 0) {
     throw { code: -32602, message: 'content 必须是非空数组，且至少包含一项媒体内容' } as JsonRpcError
   }
 
   const items = value as Array<Record<string, unknown>>
   const imageItems = items.filter(item => item.type === 'image_url')
-  const mediaCount = imageItems.length + items.filter(item => item.type === 'video_url' || item.type === 'audio_url').length
+  const mediaCount =
+    imageItems.length +
+    items.filter(item => ['video_url', 'audio_url', 'file', 'link'].includes(String(item.type))).length
   if (mediaCount === 0) {
-    throw { code: -32602, message: 'content 中必须包含至少一项 image_url、video_url 或 audio_url 媒体内容' } as JsonRpcError
+    throw {
+      code: -32602,
+      message: 'content 中必须包含至少一项 image_url、video_url、audio_url、file 或 link 媒体内容'
+    } as JsonRpcError
   }
 
   for (const item of items) {
@@ -676,9 +684,21 @@ function validateVideoContent(value: unknown): unknown[] {
       continue
     }
 
+    if (type === 'file' || type === 'link') {
+      if (model && !isWan3Model(model)) {
+        throw { code: -32602, message: `content 中 type=${type} 媒体仅 wan3 系列模型支持` } as JsonRpcError
+      }
+      const media = item[type] as Record<string, unknown> | undefined
+      if (!media || typeof media.url !== 'string') {
+        throw { code: -32602, message: `content 中 type=${type} 的项必须包含 ${type}.url 字段` } as JsonRpcError
+      }
+      assertInternetHttpUrl(media.url, `content 中 type=${type} 的 ${type}.url`)
+      continue
+    }
+
     throw {
       code: -32602,
-      message: `content 项 type 必须为 text、image_url、video_url 或 audio_url，当前为 ${String(type)}`
+      message: `content 项 type 必须为 text、image_url、video_url、audio_url、file 或 link，当前为 ${String(type)}`
     } as JsonRpcError
   }
 
@@ -707,11 +727,40 @@ function validateVideoContent(value: unknown): unknown[] {
     } as JsonRpcError
   }
 
+  // wan3 专属媒体规则：组合限制与数量上限（见 Wan3 接口文档）
+  if (model && isWan3Model(model)) {
+    const countType = (t: string) => items.filter(item => item.type === t).length
+    if (
+      hasFirstLast &&
+      (countType('video_url') > 0 || countType('audio_url') > 0 || countType('file') > 0 || countType('link') > 0)
+    ) {
+      throw {
+        code: -32602,
+        message: 'wan3 的 first_frame/last_frame 不能与参考视频、参考音频、file 或 link 混用'
+      } as JsonRpcError
+    }
+    if (countType('file') > 0 && countType('link') > 0) {
+      throw { code: -32602, message: 'wan3 的 file 与 link 不能同时使用' } as JsonRpcError
+    }
+    const wan3Limits: Array<[string, number, number]> = [
+      ['reference_image', refs.length, 10],
+      ['reference_video', countType('video_url'), 5],
+      ['reference_audio', countType('audio_url'), 5],
+      ['file', countType('file'), 1],
+      ['link', countType('link'), 1]
+    ]
+    for (const [mediaType, count, max] of wan3Limits) {
+      if (count > max) {
+        throw { code: -32602, message: `wan3 的 ${mediaType} 最多 ${max} 项，当前 ${count} 项` } as JsonRpcError
+      }
+    }
+  }
+
   return value
 }
 
 /** 查询视频生成任务状态（单次查询，不轮询；由调用方控制轮询节奏） */
-async function queryVideoTask(service: McpService, taskId: string): Promise<unknown> {
+export async function queryVideoTask(service: McpServiceConnection, taskId: string): Promise<unknown> {
   const endpoint = `${toApiRoot(service.baseUrl)}/v1/video/generations/${taskId}`
 
   const resp = await fetch(endpoint, {
@@ -733,8 +782,9 @@ async function queryVideoTask(service: McpService, taskId: string): Promise<unkn
   // 解析任务状态 - 支持多种字段名和嵌套结构
   const data = result.data || result
   const rawStatus = data.status || data.state || data.task_status || data.taskStatus || data.task_state
-  // 无状态字段但直接携带视频 URL（同步返回风格）视为已完成
-  const status = rawStatus || (data.video_url || data.url || data.output_url ? 'completed' : undefined)
+  // 无状态字段但直接携带视频 URL（同步返回风格）视为已完成；result_url 为 Wan3 查询结果字段
+  const status =
+    rawStatus || (data.video_url || data.url || data.output_url || data.result_url ? 'completed' : undefined)
 
   return {
     task_id: taskId,
@@ -743,7 +793,205 @@ async function queryVideoTask(service: McpService, taskId: string): Promise<unkn
   }
 }
 
-/** 调用上游视频生成 API（文生/参考内容生视频，异步任务模式） */
+/** 提交视频生成任务：POST {baseUrl}/v1/video/generations，解析 task_id 返回（不轮询，查询节奏由调用方控制）。 */
+async function submitVideoGeneration(service: McpService, body: Record<string, unknown>): Promise<unknown> {
+  const endpoint = `${toApiRoot(service.baseUrl)}/v1/video/generations`
+  const resp = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${service.apiKey.trim()}`
+    },
+    body: JSON.stringify(body)
+  })
+  const text = await resp.text()
+  if (!resp.ok) {
+    throw { code: resp.status, message: `上游返回 ${resp.status}: ${text.slice(0, 500)}` } as JsonRpcError
+  }
+
+  const submitResult = text ? jsonOrThrow(text) as any : null
+  if (!submitResult) {
+    throw { code: -32603, message: '上游返回为空' } as JsonRpcError
+  }
+
+  // 获取 task_id；有则返回任务 ID 供调用方查询（不做轮询）
+  const taskId = submitResult.task_id || submitResult.id || submitResult.taskId
+  if (!taskId) {
+    // 如果没有 task_id，可能是同步返回，直接返回结果
+    return submitResult
+  }
+
+  return {
+    ...submitResult,
+    task_id: taskId,
+    status: submitResult.status || submitResult.state || 'submitted'
+  }
+}
+
+/** Seedance 系模型 metadata 打包：content + 分辨率/时长/比例/帧率/音频/种子/水印（沿用网关既有格式）。 */
+function buildSeedanceMetadata(
+  params: Record<string, unknown>,
+  content: unknown[] | undefined
+): Record<string, unknown> {
+  // 可选参数统一放入 metadata：resolution
+  const metadata: Record<string, unknown> = content === undefined ? {} : { content }
+
+  const resolution = params.resolution
+  if (typeof resolution === 'string' && resolution.trim()) {
+    metadata.resolution = resolution.trim()
+  }
+
+  // 可选参数：seconds（对外唯一时长参数；仍兼容历史客户端显式传 duration；合法性校验：4-15 整数或 -1）
+  const seconds = params.seconds ?? params.duration
+  if (typeof seconds === 'number') {
+    const secInt = Math.floor(seconds)
+    if (secInt !== -1 && (secInt < 4 || secInt > 15)) {
+      throw { code: -32602, message: 'seconds 必须为 4-15 的整数，或 -1（模型自动选择时长）' } as JsonRpcError
+    }
+    metadata.duration = secInt
+  }
+
+  // 可选参数：ratio
+  const ratio = params.ratio
+  if (typeof ratio === 'string' && ratio.trim()) {
+    metadata.ratio = ratio.trim()
+  }
+
+  // 可选参数：fps
+  const fps = params.fps
+  if (typeof fps === 'number' && (fps === 24 || fps === 60)) {
+    metadata.fps = fps
+  }
+
+  // 可选参数：generate_audio（兼容旧参数名 audio）
+  const generateAudio = params.generate_audio ?? params.audio
+  if (typeof generateAudio === 'boolean') {
+    metadata.generate_audio = generateAudio
+  }
+
+  // 可选参数：seed
+  const seed = params.seed
+  if (typeof seed === 'number' && Number.isInteger(seed)) {
+    metadata.seed = seed
+  }
+
+  // 可选参数：watermark
+  const watermark = params.watermark
+  if (typeof watermark === 'boolean') {
+    metadata.watermark = watermark
+  }
+
+  return metadata
+}
+
+/**
+ * wan3 系模型打包：content 翻译为网关 metadata.media（type 直接采用媒体角色，text 项并入提示词），
+ * 分辨率大小写归一（无 4K）、时长放宽 2-30、generate_audio 映射为 audio、不支持 fps、
+ * 额外支持 prompt_extend（wan3 专属，file/link 媒体必须开启）。
+ */
+function buildWan3Metadata(
+  params: Record<string, unknown>,
+  content: unknown[] | undefined
+): { metadata: Record<string, unknown>; prompt: string } {
+  const metadata: Record<string, unknown> = {}
+  let prompt = typeof params.prompt === 'string' ? params.prompt.trim() : ''
+
+  // content → metadata.media；合法性与组合限制已由 validateVideoContent 校验
+  if (content && content.length > 0) {
+    const media: Array<{ type: string; url: string }> = []
+    for (const item of content as Array<Record<string, unknown>>) {
+      const type = String(item.type)
+      if (type === 'text') {
+        if (typeof item.text === 'string' && item.text.trim()) prompt = `${prompt}\n${item.text.trim()}`
+        continue
+      }
+      const field = item[type] as { url?: unknown } | undefined
+      const url = typeof field?.url === 'string' ? field.url : ''
+      if (!url) continue
+      media.push({
+        // image_url 按角色直译（reference_image/first_frame/last_frame）；video/audio 补全角色；file/link 与 wan3 媒体类型同名
+        type:
+          type === 'image_url'
+            ? String(item.role)
+            : type === 'video_url'
+              ? 'reference_video'
+              : type === 'audio_url'
+                ? 'reference_audio'
+                : type,
+        url
+      })
+    }
+    if (media.length > 0) metadata.media = media
+  }
+
+  // resolution：480p/720p/1080p → 480P/720P/1080P（wan3 无 4K）
+  const resolution = typeof params.resolution === 'string' ? params.resolution.trim().toUpperCase() : ''
+  if (resolution) {
+    if (!(WAN3_RESOLUTIONS as readonly string[]).includes(resolution)) {
+      throw {
+        code: -32602,
+        message: `wan3 系列模型仅支持 ${WAN3_RESOLUTIONS.join(' / ')} 分辨率，当前为 ${String(params.resolution)}`
+      } as JsonRpcError
+    }
+    metadata.resolution = resolution
+  }
+
+  // duration：wan3 支持 2-30 或 -1（智能时长），比 Seedance 的 4-15 更宽
+  const seconds = params.seconds ?? params.duration
+  if (typeof seconds === 'number') {
+    const secInt = Math.floor(seconds)
+    if (secInt !== -1 && (secInt < 2 || secInt > 30)) {
+      throw { code: -32602, message: 'wan3 的 seconds 必须为 2-30 的整数，或 -1（智能时长）' } as JsonRpcError
+    }
+    metadata.duration = secInt
+  }
+
+  // ratio：档位与统一枚举一致，直接透传
+  const ratio = typeof params.ratio === 'string' ? params.ratio.trim() : ''
+  if (ratio) metadata.ratio = ratio
+
+  // 音频：统一参数 generate_audio（旧名 audio）→ wan3 的 audio（上游默认 true）
+  const generateAudio = params.generate_audio ?? params.audio
+  if (typeof generateAudio === 'boolean') {
+    metadata.audio = generateAudio
+  }
+
+  // wan3 无 fps 参数，显式报错避免静默丢参
+  if (params.fps !== undefined) {
+    throw { code: -32602, message: 'wan3 系列模型不支持 fps 参数，请去掉后重试' } as JsonRpcError
+  }
+
+  // seed：-1 或 0-2147483647
+  const seed = params.seed
+  if (typeof seed === 'number' && Number.isInteger(seed)) {
+    if (seed !== -1 && (seed < 0 || seed > 2147483647)) {
+      throw { code: -32602, message: 'wan3 的 seed 必须为 -1 或 0-2147483647 的整数' } as JsonRpcError
+    }
+    metadata.seed = seed
+  }
+
+  // 可选参数：watermark
+  const watermark = params.watermark
+  if (typeof watermark === 'boolean') {
+    metadata.watermark = watermark
+  }
+
+  // prompt_extend：wan3 专属；使用 file/link 媒体时上游要求必须为 true
+  const promptExtend = params.prompt_extend
+  if (typeof promptExtend === 'boolean') {
+    metadata.prompt_extend = promptExtend
+  }
+  const usesFileOrLink =
+    Array.isArray(metadata.media) &&
+    (metadata.media as Array<{ type: string }>).some(m => m.type === 'file' || m.type === 'link')
+  if (usesFileOrLink && promptExtend === false) {
+    throw { code: -32602, message: '使用 file/link 媒体时 wan3 要求 prompt_extend 必须为 true' } as JsonRpcError
+  }
+
+  return { metadata, prompt }
+}
+
+/** 调用上游视频生成 API（文生/参考内容生视频，异步任务模式；Seedance 与 wan3 系列按模型分流打包） */
 async function generateVideo(
   service: McpService,
   params?: Record<string, unknown>
@@ -758,94 +1006,18 @@ async function generateVideo(
 
   const model = pickVideoModel(service, params)
   const rawContent = extractVideoContent(params, false)
-  const content = rawContent === undefined ? undefined : validateVideoContent(rawContent)
-  const body: Record<string, unknown> = {
-    model,
-    prompt
+  const content = rawContent === undefined ? undefined : validateVideoContent(rawContent, model)
+
+  const body: Record<string, unknown> = { model, prompt }
+  if (isWan3Model(model)) {
+    const wan3 = buildWan3Metadata(params || {}, content)
+    body.prompt = wan3.prompt
+    body.metadata = wan3.metadata
+  } else {
+    body.metadata = buildSeedanceMetadata(params || {}, content)
   }
 
-  // 可选参数统一放入 metadata：resolution
-  const metadata: Record<string, unknown> = content === undefined ? {} : { content }
-
-  const resolution = params?.resolution
-  if (typeof resolution === 'string' && resolution.trim()) {
-    metadata.resolution = resolution.trim()
-  }
-
-  // 可选参数：seconds（对外唯一时长参数；仍兼容历史客户端显式传 duration；合法性校验：4-15 整数或 -1）
-  const seconds = params?.seconds ?? params?.duration
-  if (typeof seconds === 'number') {
-    const secInt = Math.floor(seconds)
-    if (secInt !== -1 && (secInt < 4 || secInt > 15)) {
-      throw { code: -32602, message: 'seconds 必须为 4-15 的整数，或 -1（模型自动选择时长）' } as JsonRpcError
-    }
-    metadata.duration = secInt
-  }
-
-  // 可选参数：ratio
-  const ratio = params?.ratio
-  if (typeof ratio === 'string' && ratio.trim()) {
-    metadata.ratio = ratio.trim()
-  }
-
-  // 可选参数：fps
-  const fps = params?.fps
-  if (typeof fps === 'number' && (fps === 24 || fps === 60)) {
-    metadata.fps = fps
-  }
-
-  // 可选参数：generate_audio（兼容旧参数名 audio）
-  const generateAudio = params?.generate_audio ?? params?.audio
-  if (typeof generateAudio === 'boolean') {
-    metadata.generate_audio = generateAudio
-  }
-
-  // 可选参数：seed
-  const seed = params?.seed
-  if (typeof seed === 'number' && Number.isInteger(seed)) {
-    metadata.seed = seed
-  }
-
-  // 可选参数：watermark
-  const watermark = params?.watermark
-  if (typeof watermark === 'boolean') {
-    metadata.watermark = watermark
-  }
-
-  body.metadata = metadata
-
-  // 提交任务
-  const endpoint = `${toApiRoot(service.baseUrl)}/v1/video/generations`
-  const resp = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${service.apiKey.trim()}`
-    },
-    body: JSON.stringify(body)
-  })
-  const text = await resp.text()
-  if (!resp.ok) {
-    throw { code: resp.status, message: `上游返回 ${resp.status}: ${text.slice(0, 500)}` } as JsonRpcError
-  }
-  
-  const submitResult = text ? jsonOrThrow(text) as any : null
-  if (!submitResult) {
-    throw { code: -32603, message: '上游返回为空' } as JsonRpcError
-  }
-  
-  // 获取 task_id；有则返回任务 ID 供调用方查询（不做轮询）
-  const taskId = submitResult.task_id || submitResult.id || submitResult.taskId
-  if (!taskId) {
-    // 如果没有 task_id，可能是同步返回，直接返回结果
-    return submitResult
-  }
-
-  return {
-    ...submitResult,
-    task_id: taskId,
-    status: submitResult.status || submitResult.state || 'submitted'
-  }
+  return submitVideoGeneration(service, body)
 }
 
 /** 调用上游视频生成 API（参考内容生视频，支持图片、帧控制、视频与音频引用） */
@@ -861,94 +1033,20 @@ async function generateVideoFromImage(
     throw { code: -32602, message: '缺少参数 prompt（视频描述）' } as JsonRpcError
   }
 
-  // 统一 content 处理：参考图、帧控制、参考视频和参考音频都用 content。
-  const content = validateVideoContent(extractVideoContent(params, true))
-
   const model = pickVideoModel(service, params)
-  // content 与可选参数统一放入 metadata
-  const metadata: Record<string, unknown> = { content }
+  // 统一 content 处理：参考图、帧控制、参考视频和参考音频都用 content。
+  const content = validateVideoContent(extractVideoContent(params, true), model)
+
   const body: Record<string, unknown> = { model, prompt }
-
-  // 可选参数：resolution
-  const resolution = params?.resolution
-  if (typeof resolution === 'string' && resolution.trim()) {
-    metadata.resolution = resolution.trim()
+  if (isWan3Model(model)) {
+    const wan3 = buildWan3Metadata(params || {}, content)
+    body.prompt = wan3.prompt
+    body.metadata = wan3.metadata
+  } else {
+    body.metadata = buildSeedanceMetadata(params || {}, content)
   }
 
-  // 可选参数：seconds（对外唯一时长参数；仍兼容历史客户端显式传 duration；合法性校验：4-15 整数或 -1）
-  const seconds = params?.seconds ?? params?.duration
-  if (typeof seconds === 'number') {
-    const secInt = Math.floor(seconds)
-    if (secInt !== -1 && (secInt < 4 || secInt > 15)) {
-      throw { code: -32602, message: 'seconds 必须为 4-15 的整数，或 -1（模型自动选择时长）' } as JsonRpcError
-    }
-    metadata.duration = secInt
-  }
-
-  // 可选参数：ratio
-  const ratio = params?.ratio
-  if (typeof ratio === 'string' && ratio.trim()) {
-    metadata.ratio = ratio.trim()
-  }
-
-  // 可选参数：fps
-  const fps = params?.fps
-  if (typeof fps === 'number' && (fps === 24 || fps === 60)) {
-    metadata.fps = fps
-  }
-
-  // 可选参数：generate_audio（兼容旧参数名 audio）
-  const generateAudio = params?.generate_audio ?? params?.audio
-  if (typeof generateAudio === 'boolean') {
-    metadata.generate_audio = generateAudio
-  }
-
-  // 可选参数：seed
-  const seed = params?.seed
-  if (typeof seed === 'number' && Number.isInteger(seed)) {
-    metadata.seed = seed
-  }
-
-  // 可选参数：watermark
-  const watermark = params?.watermark
-  if (typeof watermark === 'boolean') {
-    metadata.watermark = watermark
-  }
-
-  body.metadata = metadata
-
-  // 提交任务
-  const endpoint = `${toApiRoot(service.baseUrl)}/v1/video/generations`
-  const resp = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${service.apiKey.trim()}`
-    },
-    body: JSON.stringify(body)
-  })
-  const text = await resp.text()
-  if (!resp.ok) {
-    throw { code: resp.status, message: `上游返回 ${resp.status}: ${text.slice(0, 500)}` } as JsonRpcError
-  }
-  
-  const submitResult = text ? jsonOrThrow(text) as any : null
-  if (!submitResult) {
-    throw { code: -32603, message: '上游返回为空' } as JsonRpcError
-  }
-  
-  // 获取 task_id；有则返回任务 ID 供调用方查询（不做轮询）
-  const taskId = submitResult.task_id || submitResult.id || submitResult.taskId
-  if (!taskId) {
-    // 如果没有 task_id，可能是同步返回，直接返回结果
-    return submitResult
-  }
-
-  return {
-    ...submitResult,
-    task_id: taskId,
-    status: submitResult.status || submitResult.state || 'submitted'
-  }
+  return submitVideoGeneration(service, body)
 }
 
 /** 3D 模型已由平台统一；此参数只作为特殊场景的可选覆盖。 */
@@ -1129,7 +1227,7 @@ async function generateMultiviewToModel3D(
 }
 
 /** 查询 3D 生成任务状态：独立调用 GET /v1/3d/generations/{task_id} */
-async function query3DGenerationTask(service: McpService, taskId: string): Promise<unknown> {
+export async function query3DGenerationTask(service: McpServiceConnection, taskId: string): Promise<unknown> {
   const endpoint = `${toApiRoot(service.baseUrl)}/v1/3d/generations/${encodeURIComponent(taskId)}`
   const resp = await fetch(endpoint, {
     headers: { authorization: `Bearer ${service.apiKey.trim()}` }
@@ -1576,190 +1674,6 @@ async function postProcessRig(
   return { tool: 'rig_model_3d', ...submitted }
 }
 
-/** 通过 Provider Key 读取所属组织的云存储配置（凭据只在内存中短暂使用）。 */
-async function getCloudStorageConfig(
-  service: McpService,
-  provider?: CloudStorageProvider
-): Promise<CloudStorageConfig> {
-  if (!service.apiKey.trim()) {
-    throw { code: -32603, message: '未配置 API Key，请在设置中填写后再请求' } as JsonRpcError
-  }
-
-  const query = provider ? `provider=${provider}` : ''
-  const endpoint = `${toApiRoot(service.baseUrl)}/api/cloud-storage/config${query ? `?${query}` : ''}`
-  const resp = await fetch(endpoint, {
-    headers: { authorization: `Bearer ${service.apiKey.trim()}` }
-  })
-  const text = await resp.text()
-  if (!resp.ok) {
-    throw { code: resp.status, message: `获取云存储配置失败 ${resp.status}: ${text.slice(0, 500)}` } as JsonRpcError
-  }
-
-  let body: { success?: boolean; data?: CloudStorageConfig; message?: string }
-  try {
-    body = text ? (jsonOrThrow(text) as typeof body) : {}
-  } catch {
-    throw { code: -32603, message: '云存储配置返回不是有效 JSON' } as JsonRpcError
-  }
-
-  const data = body.data
-  if (!body.success || !data || (data.provider !== 'cos' && data.provider !== 'oss')) {
-    throw { code: -32603, message: body.message || '云存储未配置，或存储类型不是 COS/OSS' } as JsonRpcError
-  }
-  if (!data.bucket) {
-    throw { code: -32603, message: '云存储配置缺少 bucket' } as JsonRpcError
-  }
-  if (
-    data.provider === 'cos' &&
-    (!data.region || !data.credentials?.secret_id || !data.credentials?.secret_key)
-  ) {
-    throw { code: -32603, message: '腾讯云 COS 配置缺少 region 或凭据' } as JsonRpcError
-  }
-  if (
-    data.provider === 'oss' &&
-    (!data.endpoint || !data.credentials?.access_key_id || !data.credentials?.access_key_secret)
-  ) {
-    throw { code: -32603, message: '阿里云 OSS 配置缺少 endpoint 或凭据' } as JsonRpcError
-  }
-  return data
-}
-
-function canonicalList(values: Record<string, string>, formatter: (key: string, value: string) => string): string {
-  return Object.entries(values)
-    .map(([key, value]) => formatter(encodeURIComponent(key).toLowerCase(), encodeURIComponent(value)))
-    .sort()
-    .join('&')
-}
-
-/** 生成腾讯云 COS 预签名 URL；只签名业务参数与显式请求头。 */
-function buildSignedCosUrl(input: SignedCosUrlInput): string {
-  const requestPath = input.key
-    .split('/')
-    .map((part) => encodeURIComponent(part))
-    .join('/')
-  const requestPathname = `/${requestPath}`
-  const signaturePathname = `/${input.key}`
-  const now = Math.floor(Date.now() / 1000)
-  const keyTime = `${now};${now + input.expires}`
-  const signKey = createHmac('sha1', input.secretKey).update(keyTime).digest('hex')
-
-  const params = Object.fromEntries(
-    Object.entries(input.params || {}).map(([key, value]) => [key.toLowerCase(), value])
-  )
-  const headers = Object.fromEntries(
-    Object.entries(input.headers || {}).map(([key, value]) => [key.toLowerCase(), value])
-  )
-  const paramsString = canonicalList(params, (key, value) => `${key}=${value}`)
-  const headersString = canonicalList(headers, (key, value) => `${key}=${value.replace(/\s+/g, ' ').trim()}`)
-  const httpString = `${input.method.toLowerCase()}\n${signaturePathname}\n${paramsString}\n${headersString}\n`
-  const stringToSign = `sha1\n${keyTime}\n${createHash('sha1').update(httpString).digest('hex')}\n`
-  const signature = createHmac('sha1', signKey).update(stringToSign).digest('hex')
-
-  const query = new URLSearchParams({
-    'q-sign-algorithm': 'sha1',
-    'q-ak': input.secretId,
-    'q-sign-time': keyTime,
-    'q-key-time': keyTime,
-    'q-header-list': Object.keys(headers).sort().join(';'),
-    'q-url-param-list': Object.keys(params).sort().join(';'),
-    'q-signature': signature
-  })
-  return `https://${input.host}${requestPathname}?${query.toString()}`
-}
-
-/** COS API 必须走虚拟主机域名；自定义域名只用于公开访问 URL。 */
-function cosApiHost(config: CloudStorageConfig): string {
-  return `${config.bucket}.cos.${config.region}.myqcloud.com`
-}
-
-function cosPublicHost(config: CloudStorageConfig): string {
-  const custom = config.custom_domain?.trim().replace(/\/+$/, '')
-  if (custom) return custom.replace(/^https?:\/\//i, '')
-  return cosApiHost(config)
-}
-
-/** 生成 OSS V1 预签名 URL；上传时显式签名 Content-Type。 */
-function buildSignedOssUrl(input: SignedOssUrlInput): string {
-  const pathname = input.key
-    .split('/')
-    .map((part) => encodeURIComponent(part))
-    .join('/')
-  const expires = Math.floor(Date.now() / 1000) + input.expires
-  const contentType = input.contentType || ''
-  const stringToSign = [
-    input.method,
-    '',
-    contentType,
-    String(expires),
-    `/${input.bucket}/${input.key}`
-  ].join('\n')
-  const signature = createHmac('sha1', input.accessKeySecret)
-    .update(stringToSign)
-    .digest('base64')
-
-  const query = new URLSearchParams({
-    OSSAccessKeyId: input.accessKeyId,
-    Expires: String(expires),
-    Signature: signature
-  })
-  return `${input.baseUrl}/${pathname}?${query.toString()}`
-}
-
-/** OSS 走虚拟主机域名；管理端可能存区域 Endpoint 或已带 bucket 的完整 Endpoint。 */
-function resolveOssTarget(config: CloudStorageConfig): OssTarget {
-  const rawEndpoint = config.endpoint.trim()
-  const endpointUrl = new URL(/^https?:\/\//i.test(rawEndpoint) ? rawEndpoint : `https://${rawEndpoint}`)
-  const endpointHost = endpointUrl.host
-  const uploadHost = endpointHost.startsWith(`${config.bucket}.`)
-    ? endpointHost
-    : `${config.bucket}.${endpointHost}`
-  const custom = config.custom_domain?.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '')
-
-  return {
-    protocol: endpointUrl.protocol.replace(':', ''),
-    uploadHost,
-    publicHost: custom || uploadHost
-  }
-}
-
-function sanitizeFileName(name: string): string {
-  const base = name.split(/[\\/]/).pop() || ''
-  return base
-    .replace(/[\\/:*?"<>|\r\n\t]+/g, '_')
-    .replace(/^\.+/, '')
-    .trim()
-    .slice(0, 120)
-}
-
-function guessContentType(filename: string): string {
-  const ext = path.extname(filename).toLowerCase()
-  const types: Record<string, string> = {
-    '.png': 'image/png',
-    '.jpg': 'image/jpeg',
-    '.jpeg': 'image/jpeg',
-    '.gif': 'image/gif',
-    '.webp': 'image/webp',
-    '.svg': 'image/svg+xml',
-    '.pdf': 'application/pdf',
-    '.txt': 'text/plain',
-    '.md': 'text/markdown',
-    '.csv': 'text/csv',
-    '.json': 'application/json',
-    '.mp3': 'audio/mpeg',
-    '.wav': 'audio/wav',
-    '.mp4': 'video/mp4',
-    '.webm': 'video/webm',
-    '.zip': 'application/zip'
-  }
-  return types[ext] || 'application/octet-stream'
-}
-
-function parsePresignedExpires(value: unknown): number {
-  const requested = typeof value === 'number' ? value : Number(value)
-  const expires = Number.isFinite(requested) ? Math.floor(requested) : 3600
-  return Math.min(Math.max(expires, MIN_PRESIGNED_EXPIRES), MAX_PRESIGNED_EXPIRES)
-}
-
 function decodeUploadContent(
   content: string,
   filename: string
@@ -1803,7 +1717,6 @@ async function uploadFileToCloudStorage(
   if (rawProvider && rawProvider !== 'cos' && rawProvider !== 'oss') {
     throw { code: -32602, message: 'provider 仅支持 cos 或 oss' } as JsonRpcError
   }
-  const config = await getCloudStorageConfig(service, (rawProvider || undefined) as CloudStorageProvider | undefined)
   const filePath = typeof params?.file_path === 'string' ? params.file_path.trim() : ''
   const content = typeof params?.content === 'string' ? params.content.trim() : ''
   if (Boolean(filePath) === Boolean(content)) {
@@ -1825,83 +1738,15 @@ async function uploadFileToCloudStorage(
     throw { code: -32602, message: `文件过大（上限 ${Math.floor(MAX_FILE_UPLOAD_SIZE / 1024 / 1024)}MB）` } as JsonRpcError
   }
 
-  const expires = parsePresignedExpires(params?.expires_in)
-  const datePath = new Date().toISOString().slice(0, 10).replace(/-/g, '')
-  const normalizedPrefix = config.path_prefix?.replace(/^\/+|\/+$/g, '') || ''
-  const key = [normalizedPrefix, 'mcp-uploads', datePath, `${randomUUID()}_${filename}`]
-    .filter(Boolean)
-    .join('/')
-  const contentType = guessContentType(filename)
-
-  let uploadUrl: string
-  let publicUrl: string
-  if (config.provider === 'oss') {
-    const target = resolveOssTarget(config)
-    const accessKeyId = config.credentials.access_key_id || ''
-    const accessKeySecret = config.credentials.access_key_secret || ''
-    uploadUrl = buildSignedOssUrl({
-      method: 'PUT',
-      baseUrl: `${target.protocol}://${target.uploadHost}`,
-      bucket: config.bucket,
-      key,
-      accessKeyId,
-      accessKeySecret,
-      expires: 600,
-      contentType
-    })
-    publicUrl = buildSignedOssUrl({
-      method: 'GET',
-      baseUrl: `${target.protocol}://${target.publicHost}`,
-      bucket: config.bucket,
-      key,
-      accessKeyId,
-      accessKeySecret,
-      expires
-    })
-  } else {
-    uploadUrl = buildSignedCosUrl({
-      method: 'PUT',
-      host: cosApiHost(config),
-      key,
-      secretId: config.credentials.secret_id || '',
-      secretKey: config.credentials.secret_key || '',
-      expires: 600,
-      headers: { 'content-type': contentType }
-    })
-    publicUrl = buildSignedCosUrl({
-      method: 'GET',
-      host: cosPublicHost(config),
-      key,
-      secretId: config.credentials.secret_id || '',
-      secretKey: config.credentials.secret_key || '',
-      expires
-    })
-  }
-
-  const uploadResp = await fetch(uploadUrl, {
-    method: 'PUT',
-    headers: { 'content-type': contentType },
-    body: new Uint8Array(buffer)
-  })
-  if (!uploadResp.ok) {
-    const errorText = await uploadResp.text()
-    throw {
-      code: uploadResp.status,
-      message: `${config.provider.toUpperCase()} 上传失败 ${uploadResp.status}: ${errorText.slice(0, 800)}`
-    } as JsonRpcError
-  }
-
-  return {
-    url: publicUrl,
-    key,
-    bucket: config.bucket,
-    provider: config.provider,
+  return uploadToCloudStorage({
+    baseUrl: service.baseUrl,
+    apiKey: service.apiKey,
+    buffer,
     filename,
-    size: buffer.byteLength,
-    content_type: contentType,
-    expires_in: expires,
-    expires_at: new Date(Date.now() + expires * 1000).toISOString()
-  }
+    provider: (rawProvider || undefined) as CloudStorageProvider | undefined,
+    keyPrefix: 'mcp-uploads',
+    expiresIn: parsePresignedExpires(params?.expires_in)
+  })
 }
 
 /** tools/list 声明。 */
@@ -2003,16 +1848,17 @@ function listTools(serviceType: string): unknown[] {
             model: {
               type: 'string',
               enum: BUILTIN_MCP_VIDEO_DEFAULTS.models,
-              description: '模型 ID，缺省使用默认模型'
+              description:
+                '模型 ID，缺省使用默认模型；wan3.0-video 走 Wan3 接口，其余为 doubao-seedance'
             },
             resolution: {
               type: 'string',
               enum: BUILTIN_MCP_VIDEO_DEFAULTS.resolutions,
-              description: '视频分辨率：480p、720p、1080p、4K'
+              description: '视频分辨率：480p、720p、1080p、4K；4K 仅 doubao-seedance 支持，wan3 系列为 480P/720P/1080P'
             },
             seconds: {
               type: 'integer',
-              description: '视频时长（秒）：4-15 的整数，或 -1（模型自动选择）'
+              description: '视频时长（秒）：doubao-seedance 为 4-15、wan3 系列为 2-30 的整数，或 -1（模型自动选择）'
             },
             ratio: {
               type: 'string',
@@ -2022,11 +1868,15 @@ function listTools(serviceType: string): unknown[] {
             fps: {
               type: 'integer',
               enum: BUILTIN_MCP_VIDEO_DEFAULTS.fps,
-              description: '帧率：24 或 60'
+              description: '帧率：24 或 60（仅 doubao-seedance 支持，wan3 系列不支持）'
             },
             generate_audio: {
               type: 'boolean',
-              description: '是否生成音频，默认 false（兼容旧参数名 audio）'
+              description: '是否生成音频（兼容旧参数名 audio；Seedance 默认 false，wan3 系列上游默认 true）'
+            },
+            prompt_extend: {
+              type: 'boolean',
+              description: 'wan3 系列专属：是否开启提示词智能改写，默认 true；使用 file/link 媒体时必须为 true'
             },
             seed: {
               type: 'integer',
@@ -2051,16 +1901,17 @@ function listTools(serviceType: string): unknown[] {
             model: {
               type: 'string',
               enum: BUILTIN_MCP_VIDEO_DEFAULTS.models,
-              description: '模型 ID，缺省使用默认模型'
+              description:
+                '模型 ID，缺省使用默认模型；wan3.0-video 走 Wan3 接口，其余为 doubao-seedance'
             },
             resolution: {
               type: 'string',
               enum: BUILTIN_MCP_VIDEO_DEFAULTS.resolutions,
-              description: '视频分辨率：480p、720p、1080p、4K'
+              description: '视频分辨率：480p、720p、1080p、4K；4K 仅 doubao-seedance 支持，wan3 系列为 480P/720P/1080P'
             },
             seconds: {
               type: 'integer',
-              description: '视频时长（秒）：4-15 的整数，或 -1（模型自动选择）'
+              description: '视频时长（秒）：doubao-seedance 为 4-15、wan3 系列为 2-30 的整数，或 -1（模型自动选择）'
             },
             ratio: {
               type: 'string',
@@ -2070,11 +1921,15 @@ function listTools(serviceType: string): unknown[] {
             fps: {
               type: 'integer',
               enum: BUILTIN_MCP_VIDEO_DEFAULTS.fps,
-              description: '帧率：24 或 60'
+              description: '帧率：24 或 60（仅 doubao-seedance 支持，wan3 系列不支持）'
             },
             generate_audio: {
               type: 'boolean',
-              description: '是否生成音频，默认 false（兼容旧参数名 audio）'
+              description: '是否生成音频（兼容旧参数名 audio；Seedance 默认 false，wan3 系列上游默认 true）'
+            },
+            prompt_extend: {
+              type: 'boolean',
+              description: 'wan3 系列专属：是否开启提示词智能改写，默认 true；使用 file/link 媒体时必须为 true'
             },
             seed: {
               type: 'integer',
@@ -2350,7 +2205,8 @@ function listTools(serviceType: string): unknown[] {
 
 async function dispatch(
   service: McpService,
-  req: JsonRpcRequest
+  req: JsonRpcRequest,
+  clientName?: string
 ): Promise<JsonRpcResponse> {
   const id = req.id ?? null
   try {
@@ -2454,6 +2310,14 @@ async function dispatch(
         } else {
           throw { code: -32602, message: `不支持的服务类型: ${service.type}` } as JsonRpcError
         }
+        // 生成资产归档：工具成功返回后 fire-and-forget 通知钩子，绝不影响工具响应
+        if (output !== null && output !== undefined && toolCallHook) {
+          try {
+            toolCallHook({ service, toolName, args, output, clientName })
+          } catch {
+            /* 归档入口异常不影响工具调用 */
+          }
+        }
         result = {
           content: [
             {
@@ -2493,6 +2357,25 @@ export async function startMcpServer(
   service: McpService,
   port: number = MCP_DEFAULT_PORT
 ): Promise<McpServerHandle> {
+  // best-effort 调用方识别：initialize 的 clientInfo 优先（按 mcp-session-id 记忆），退路 User-Agent 关键字
+  const sessionClients = new Map<string, string>()
+
+  function resolveClientName(req: http.IncomingMessage): string | undefined {
+    const sid = req.headers['mcp-session-id']
+    if (typeof sid === 'string' && sid.trim()) {
+      const known = sessionClients.get(sid.trim())
+      if (known) return known
+    }
+    const ua = req.headers['user-agent']
+    if (typeof ua === 'string' && ua.trim()) {
+      const l = ua.toLowerCase()
+      if (l.includes('workbuddy')) return 'WorkBuddy'
+      if (l.includes('codex')) return 'Codex'
+      return ua.slice(0, 80)
+    }
+    return undefined
+  }
+
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url || '/', 'http://127.0.0.1')
 
@@ -2528,6 +2411,16 @@ export async function startMcpServer(
         return
       }
 
+      // initialize 时顺手记忆 clientInfo（按 mcp-session-id），不改变响应内容
+      if (body.method === 'initialize') {
+        const clientInfoName = (body.params as { clientInfo?: { name?: unknown } } | undefined)?.clientInfo
+          ?.name
+        const sid = req.headers['mcp-session-id']
+        if (typeof clientInfoName === 'string' && clientInfoName.trim() && typeof sid === 'string' && sid.trim()) {
+          sessionClients.set(sid.trim(), clientInfoName.trim().slice(0, 80))
+        }
+      }
+
       // JSON-RPC 2.0 通知（请求无 id 字段，如 notifications/initialized）：
       // 规范要求回 202 Accepted 空响应，不产生 JSON-RPC 响应体，严格客户端会校验这一点。
       if (body.id === undefined) {
@@ -2536,7 +2429,7 @@ export async function startMcpServer(
         return
       }
 
-      const response = await dispatch(service, body)
+      const response = await dispatch(service, body, resolveClientName(req))
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
       res.end(JSON.stringify(response))
       return

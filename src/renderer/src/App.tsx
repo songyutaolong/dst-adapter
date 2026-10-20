@@ -4,8 +4,11 @@ import type {
   AppInfo,
   AppSettings,
   ApplyResult,
+  AssetKind,
+  AssetRecord,
   GatewayMeResult,
   Provider,
+  SettingsRewriteEvent,
   SpeedTestResult,
   McpService,
   Model,
@@ -18,12 +21,18 @@ import type {
   UpdateState
 } from '../../shared/types'
 import {
+  APP_META,
   BUILTIN_MCP_IMAGE_DEFAULTS,
   BUILTIN_MCP_UEMCP_DEFAULTS,
   BUILTIN_MCP_VIDEO_DEFAULTS,
-  DEFAULT_PROVIDER_ENDPOINT
+  DEFAULT_PROVIDER_ENDPOINT,
+  DEFAULT_SETTINGS,
+  ROUTING_CONVERSION_SUPPORT
 } from '../../shared/types'
-import { COMPANY_PROMPT_TEMPLATES } from '../../shared/prompts'
+import ReactMarkdown from 'react-markdown'
+import remarkBreaks from 'remark-breaks'
+import remarkGfm from 'remark-gfm'
+import { BUILTIN_PROMPT_TEMPLATES } from '../../shared/prompts'
 import type { PromptTemplate } from '../../shared/prompts'
 
 type TabId = 'provide' | 'mcp' | 'skill'
@@ -76,11 +85,75 @@ const TABS: { id: TabId; label: string }[] = [
   { id: 'skill', label: '技能管理' }
 ]
 
+// 设置页 tab：现有设置区块按语义归类
+type SettingsTabId = 'general' | 'provider' | 'mcp' | 'apps' | 'routing' | 'about'
+
+const SETTINGS_TABS: { id: SettingsTabId; label: string }[] = [
+  { id: 'general', label: '通用' },
+  { id: 'provider', label: 'Provider' },
+  { id: 'mcp', label: 'MCP' },
+  { id: 'apps', label: '应用' },
+  { id: 'routing', label: '路由' },
+  { id: 'about', label: '关于' }
+]
+
 // 会话管理当前支持的应用
 const SESSION_APPS: { id: AppId; label: string }[] = [
   { id: 'workbuddy', label: 'WorkBuddy' },
   { id: 'codex', label: 'Codex' }
 ]
+
+// 生成记录：类型筛选与状态文案
+const ASSET_KIND_OPTIONS: { id: 'all' | AssetKind; label: string }[] = [
+  { id: 'all', label: '全部' },
+  { id: 'image', label: '图片' },
+  { id: 'video', label: '视频' },
+  { id: 'model3d', label: '3D 模型' }
+]
+
+/**
+ * 公司模板类目筛选（全部 / 2D 图像 / 3D 模型 / 视频 / 音频 / 文本 / 对话）。
+ * 平台侧类目是自由值（category 如 music、tts_sfx；target_workflow 如 text2image、audio），
+ * 这里按关键词归桶；数组顺序即匹配优先级——先具体（3d/视频）后宽泛（文本），
+ * 避免 text2image 命中"文本"、image-to-3d 命中"2D 图像"这类误判。
+ */
+const TEMPLATE_CATEGORY_BUCKETS: { id: string; label: string; keywords: string[] }[] = [
+  { id: 'model3d', label: '3D 模型', keywords: ['3d', 'model', '模型'] },
+  { id: 'video', label: '视频', keywords: ['video', '视频'] },
+  { id: 'image', label: '2D 图像', keywords: ['image', '2d', 'paint', 'draw', '图像', '绘画'] },
+  {
+    id: 'audio',
+    label: '音频',
+    keywords: ['audio', 'music', 'tts', 'sfx', 'voice', 'speech', 'sound', '音频', '音乐', '配音']
+  },
+  { id: 'chat', label: '对话', keywords: ['chat', 'dialog', 'conversation', '对话'] },
+  { id: 'text', label: '文本', keywords: ['text', 'writing', 'story', '文本', '文案'] }
+]
+
+/** 模板按 (category + target_workflow) 关键词归入类目桶，未命中任何桶的只在「全部」出现。 */
+function matchTemplateBucket(t: PromptTemplate, bucketId: string): boolean {
+  if (bucketId === 'all') return true
+  const bucket = TEMPLATE_CATEGORY_BUCKETS.find((b) => b.id === bucketId)
+  if (!bucket) return true
+  const hay = `${t.category ?? ''} ${t.targetWorkflow ?? ''}`.toLowerCase()
+  if (!hay.trim()) return false
+  return bucket.keywords.some((k) => hay.includes(k))
+}
+
+const ASSET_KIND_LABELS: Record<AssetKind, string> = {
+  image: '图片',
+  video: '视频',
+  model3d: '3D 模型'
+}
+
+const ASSET_STATUS_LABELS: Record<AssetRecord['status'], string> = {
+  pending: '生成中',
+  uploading: '上传中',
+  completed: '已归档',
+  upload_failed: '上传失败',
+  failed: '生成失败',
+  expired: '已超时'
+}
 
 function SessionIcon() {
   return (
@@ -94,6 +167,14 @@ function PromptIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
       <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z" />
+    </svg>
+  )
+}
+
+function ArchiveIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M20 2H4c-1.1 0-2 .9-2 2v3c0 .55.22 1.05.59 1.41.36.37.86.59 1.41.59v11c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V9c.55 0 1.05-.22 1.41-.59.37-.36.59-.86.59-1.41V4c0-1.1-.9-2-2-2zm-8 12H8v-2h4v2zm6 0h-4v-2h4v2zm0-6H6V4h12v4z" />
     </svg>
   )
 }
@@ -175,18 +256,23 @@ function mcpCapability(service: McpService, app: AppId): string {
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>('provide')
+  const [settingsTab, setSettingsTab] = useState<SettingsTabId>('provider')
   const [apps, setApps] = useState<AppInfo[]>([])
   const [currentApp, setCurrentApp] = useState<AppId>('workbuddy')
   const [providers, setProviders] = useState<Provider[]>([])
   const [dataDir, setDataDir] = useState('')
   const [version, setVersion] = useState('')
   const [settings, setSettings] = useState<AppSettings | null>(null)
-  const [view, setView] = useState<'home' | 'settings' | 'sessions' | 'prompts'>('home')
+  const [view, setView] = useState<'home' | 'settings' | 'sessions' | 'prompts' | 'assets'>('home')
   const showSettings = view === 'settings'
   const [form, setForm] = useState<FormState>(emptyForm())
   const [showPlainApiKey, setShowPlainApiKey] = useState(false)
   const [workBuddyPath, setWorkBuddyPath] = useState('')
   const [codexPath, setCodexPath] = useState('')
+  const [assetBaseUrl, setAssetBaseUrl] = useState('')
+  const [assetKey, setAssetKey] = useState('')
+  const [assetSecret, setAssetSecret] = useState('')
+  const [showPlainAssetSecret, setShowPlainAssetSecret] = useState(false)
   const [busy, setBusy] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [toast, setToast] = useState<{
@@ -235,28 +321,43 @@ export default function App() {
   const [messagesLoading, setMessagesLoading] = useState(false)
   const [loadingEarlier, setLoadingEarlier] = useState(false)
   const [listVisible, setListVisible] = useState(60)
-  const [sessionBusy, setSessionBusy] = useState(false)
   const [skillError, setSkillError] = useState('')
   const [skillReloadToken, setSkillReloadToken] = useState(0)
   const [skillAction, setSkillAction] = useState('')
   const [skillCloseRequired, setSkillCloseRequired] = useState(false)
 
-  // Prompts（提示词管理）
+  // Prompts（提示词管理：个人提示词与公司模板均来自 AI 能力平台）
   const [promptTab, setPromptTab] = useState<'personal' | 'company'>('personal')
   const [prompts, setPrompts] = useState<Prompt[]>([])
   const [promptsLoading, setPromptsLoading] = useState(false)
+  const [promptsError, setPromptsError] = useState('')
+  const [templates, setTemplates] = useState<PromptTemplate[]>([])
+  const [templatesLoading, setTemplatesLoading] = useState(false)
+  // 平台模板拉取失败/未配置时回退内置清单（只读兜底）
+  const [templatesFallback, setTemplatesFallback] = useState(false)
+  // 公司模板类目筛选（'all' 或 TEMPLATE_CATEGORY_BUCKETS 的 id）
+  const [templateCategory, setTemplateCategory] = useState('all')
   const [promptSearch, setPromptSearch] = useState('')
+
+  // Assets（生成记录）
+  const [assetRecords, setAssetRecords] = useState<AssetRecord[]>([])
+  const [assetsLoading, setAssetsLoading] = useState(false)
+  const [assetSearch, setAssetSearch] = useState('')
+  const [assetKindFilter, setAssetKindFilter] = useState<'all' | AssetKind>('all')
+  const [assetListVisible, setAssetListVisible] = useState(60)
   const [promptBusy, setPromptBusy] = useState(false)
   const [showPromptEditor, setShowPromptEditor] = useState(false)
   const [editingPrompt, setEditingPrompt] = useState<Prompt | null>(null)
-  const [promptForm, setPromptForm] = useState<{ name: string; content: string }>({
+  const [promptForm, setPromptForm] = useState<{ name: string; content: string; tags: string }>({
     name: '',
-    content: ''
+    content: '',
+    tags: ''
   })
   const [viewingPrompt, setViewingPrompt] = useState<{
     name: string
     description?: string
     content: string
+    tags?: string[]
     source: 'personal' | 'company'
     prompt?: Prompt
     template?: PromptTemplate
@@ -360,6 +461,15 @@ export default function App() {
     })
   }, [refresh, showToast])
 
+  // 路由/协议变更后主进程自动重写应用配置，失败时提示（设置本身已保存成功）
+  useEffect(() => {
+    return window.dst.onSettingsRewrite((r: SettingsRewriteEvent) => {
+      if (!r.ok) {
+        showToast(`路由配置重写失败（${APP_META[r.app].name}）：${r.message}`, true)
+      }
+    })
+  }, [showToast])
+
   // 网关身份：Key 配置就绪或变化时自动拉取（含保存配置后的刷新）
   const activeKey = settings?.providerApiKey?.trim() || providers[0]?.apiKey?.trim() || ''
   useEffect(() => {
@@ -451,6 +561,10 @@ export default function App() {
     const apiKey = appSettings?.providerApiKey || existing?.apiKey || ''
     setWorkBuddyPath(appSettings?.workBuddyPath || '')
     setCodexPath(appSettings?.codexPath || '')
+    setAssetBaseUrl(appSettings?.assetBaseUrl || '')
+    setAssetKey(appSettings?.assetKey || '')
+    setAssetSecret(appSettings?.assetSecret || '')
+    setShowPlainAssetSecret(false)
     setForm({
       name: appSettings?.providerName || existing?.name || 'dst',
       endpoint: appSettings?.providerEndpoint || existing?.endpoint || DEFAULT_PROVIDER_ENDPOINT,
@@ -588,21 +702,6 @@ export default function App() {
     }
   }
 
-  const onDeleteSession = async (meta: SessionMeta) => {
-    if (!window.confirm(`确定删除会话「${meta.title}」？删除后不可恢复。`)) return
-    setSessionBusy(true)
-    try {
-      const result = await window.dst.deleteSession(meta.app, meta.sessionId)
-      showToast(result.message, !result.ok)
-      if (result.ok) {
-        if (openSession?.sessionId === meta.sessionId) closeSessionDetail()
-        await loadSessions(meta.app)
-      }
-    } finally {
-      setSessionBusy(false)
-    }
-  }
-
   const saveSettingsProvider = async () => {
     const finalApiKey = form.apiKey.includes('****')
       ? form.rawApiKey || ''
@@ -652,6 +751,31 @@ export default function App() {
     }
   }
 
+  // 生成归档、会话归档始终开启（无开关），归档行为见主进程 assets/archive 与 sessionArchive
+
+  // 路由开关：保存后主进程自动重写受影响应用的配置
+  const toggleRouting = async (app: AppId) => {
+    if (!settings || busy) return
+    const nextValue = !(settings.routing?.[app] ?? DEFAULT_SETTINGS.routing[app] ?? false)
+    setBusy(true)
+    try {
+      // updateSettings 是浅合并：必须整体传 routing 对象
+      const next = await window.dst.updateSettings({
+        routing: { ...settings.routing, [app]: nextValue }
+      })
+      setSettings(next)
+      showToast(
+        nextValue
+          ? `${APP_META[app].name} 已经由本地代理`
+          : `${APP_META[app].name} 已改为直连`
+      )
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   // 刷新模型列表
   const onSyncModels = async () => {
     const endpoint = settings?.providerEndpoint || appProviders[0]?.endpoint || providers[0]?.endpoint
@@ -659,6 +783,7 @@ export default function App() {
     if (!endpoint || !apiKey?.trim()) {
       showToast('请先在设置中配置 Provider', true)
       setView('settings')
+      setSettingsTab('provider')
       return
     }
 
@@ -729,6 +854,33 @@ export default function App() {
       setSettings(next)
       showToast(next.codexPath ? 'Codex 路径已保存' : '已恢复默认 Codex 路径')
       await refresh()
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const saveAssetSettings = async () => {
+    const baseUrl = assetBaseUrl.trim()
+    if (baseUrl) {
+      try {
+        const parsed = new URL(baseUrl)
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error()
+      } catch {
+        showToast('Base URL 需以 http(s):// 开头的合法地址', true)
+        return
+      }
+    }
+    setBusy(true)
+    try {
+      const next = await window.dst.updateSettings({
+        assetBaseUrl: baseUrl,
+        assetKey: assetKey.trim(),
+        assetSecret: assetSecret.trim()
+      })
+      setSettings(next)
+      showToast('AI能力平台配置已保存')
     } catch (err) {
       showToast(err instanceof Error ? err.message : String(err), true)
     } finally {
@@ -904,6 +1056,7 @@ export default function App() {
       if (!apiKey?.trim()) {
         showToast('请先在设置中配置 Provider 并填写 API Key', true)
         setView('settings')
+        setSettingsTab('provider')
         return
       }
       await window.dst.startMcpService(s.id, currentApp)
@@ -1011,14 +1164,28 @@ export default function App() {
 
   const loadPrompts = async () => {
     setPromptsLoading(true)
+    setTemplatesLoading(true)
+    setPromptsError('')
     try {
       const list = await window.dst.listPrompts()
       setPrompts(list)
     } catch (err) {
       setPrompts([])
+      setPromptsError(err instanceof Error ? err.message : '提示词列表读取失败')
       showToast(err instanceof Error ? err.message : '提示词列表读取失败', true)
     } finally {
       setPromptsLoading(false)
+    }
+    // 公司模板：平台拉取失败（含未配置）时回退内置清单，保证离线可浏览
+    try {
+      const list = await window.dst.listPromptTemplates()
+      setTemplates(list)
+      setTemplatesFallback(false)
+    } catch {
+      setTemplates(BUILTIN_PROMPT_TEMPLATES)
+      setTemplatesFallback(true)
+    } finally {
+      setTemplatesLoading(false)
     }
   }
 
@@ -1029,24 +1196,34 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view])
 
-  // 个人提示词关键字检索：匹配名称、内容；按更新时间倒序
+  // 个人提示词关键字检索：匹配名称、内容、标签；按更新时间倒序
   const filteredPrompts = useMemo(() => {
     const q = promptSearch.trim().toLowerCase()
     const list = [...prompts].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     if (!q) return list
     return list.filter(
-      (p) => p.name.toLowerCase().includes(q) || p.content.toLowerCase().includes(q)
+      (p) =>
+        p.name.toLowerCase().includes(q) ||
+        p.content.toLowerCase().includes(q) ||
+        (p.tags ?? []).some((t) => t.toLowerCase().includes(q))
     )
   }, [prompts, promptSearch])
 
-  // 公司模板关键字检索：匹配名称、描述
+  // 公司模板类目 + 关键字检索：类目按桶匹配，关键字命中名称、简介、标签、类目
   const filteredTemplates = useMemo(() => {
     const q = promptSearch.trim().toLowerCase()
-    if (!q) return COMPANY_PROMPT_TEMPLATES
-    return COMPANY_PROMPT_TEMPLATES.filter(
-      (t) => t.name.toLowerCase().includes(q) || t.description.toLowerCase().includes(q)
-    )
-  }, [promptSearch])
+    return templates
+      .filter((t) => matchTemplateBucket(t, templateCategory))
+      .filter((t) => {
+        if (!q) return true
+        return (
+          t.name.toLowerCase().includes(q) ||
+          t.description.toLowerCase().includes(q) ||
+          t.category?.toLowerCase().includes(q) ||
+          (t.tags ?? []).some((tag) => tag.toLowerCase().includes(q))
+        )
+      })
+  }, [templates, templateCategory, promptSearch])
 
   const onCopyPrompt = async (text: string) => {
     try {
@@ -1057,15 +1234,24 @@ export default function App() {
     }
   }
 
+  /** 标签输入串 → 数组：中英文逗号分隔，去空白去重 */
+  const parsePromptTags = (raw: string): string[] => {
+    const list = raw
+      .split(/[,，]/)
+      .map((t) => t.trim())
+      .filter(Boolean)
+    return [...new Set(list)]
+  }
+
   const openPromptCreate = () => {
     setEditingPrompt(null)
-    setPromptForm({ name: '', content: '' })
+    setPromptForm({ name: '', content: '', tags: '' })
     setShowPromptEditor(true)
   }
 
   const openPromptEdit = (p: Prompt) => {
     setEditingPrompt(p)
-    setPromptForm({ name: p.name, content: p.content })
+    setPromptForm({ name: p.name, content: p.content, tags: (p.tags ?? []).join(', ') })
     setShowPromptEditor(true)
   }
 
@@ -1080,13 +1266,14 @@ export default function App() {
       showToast('请填写提示词内容', true)
       return
     }
+    const tags = parsePromptTags(promptForm.tags)
     setPromptBusy(true)
     try {
       if (editingPrompt) {
-        await window.dst.updatePrompt(editingPrompt.id, { name, content })
+        await window.dst.updatePrompt(editingPrompt.id, { name, content, tags })
         showToast('提示词已保存')
       } else {
-        await window.dst.createPrompt({ name, content })
+        await window.dst.createPrompt({ name, content, tags })
         showToast('提示词已创建')
       }
       setShowPromptEditor(false)
@@ -1116,7 +1303,7 @@ export default function App() {
   const onSaveTemplateAsPersonal = async (t: PromptTemplate) => {
     setPromptBusy(true)
     try {
-      await window.dst.createPrompt({ name: t.name, content: t.content })
+      await window.dst.createPrompt({ name: t.name, content: t.content, tags: t.tags })
       showToast(`已另存为个人提示词「${t.name}」`)
       setPromptTab('personal')
       await loadPrompts()
@@ -1124,6 +1311,84 @@ export default function App() {
       showToast(err instanceof Error ? err.message : '另存失败', true)
     } finally {
       setPromptBusy(false)
+    }
+  }
+
+  // ── 生成记录 ──
+
+  const loadAssets = async () => {
+    setAssetsLoading(true)
+    try {
+      const list = await window.dst.listAssetRecords()
+      setAssetRecords(list)
+    } catch (err) {
+      setAssetRecords([])
+      showToast(err instanceof Error ? err.message : '生成记录读取失败', true)
+    } finally {
+      setAssetsLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (view === 'assets') {
+      void loadAssets()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view])
+
+  // 归档状态推进时（轮询/上传完成）实时刷新列表
+  useEffect(() => {
+    if (view !== 'assets') return
+    return window.dst.onAssetsChanged(() => {
+      void loadAssets()
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view])
+
+  // 类型 + 关键字过滤（提示词 / 生成人 / 工具名）
+  const filteredAssetRecords = useMemo(() => {
+    const q = assetSearch.trim().toLowerCase()
+    return assetRecords.filter((r) => {
+      if (assetKindFilter !== 'all' && r.kind !== assetKindFilter) return false
+      if (!q) return true
+      return (
+        r.prompt.toLowerCase().includes(q) ||
+        r.identity?.displayName.toLowerCase().includes(q) ||
+        r.identity?.username.toLowerCase().includes(q) ||
+        r.toolName.toLowerCase().includes(q)
+      )
+    })
+  }, [assetRecords, assetSearch, assetKindFilter])
+
+  const onOpenAssetUrl = async (r: AssetRecord) => {
+    try {
+      const { url } = await window.dst.signAssetRecordUrl(r.id)
+      window.open(url, '_blank')
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : '获取云盘链接失败', true)
+    }
+  }
+
+  const onCopyAssetUrl = async (r: AssetRecord) => {
+    try {
+      const { url } = await window.dst.signAssetRecordUrl(r.id)
+      await window.dst.writeClipboard(url)
+      showToast('链接已复制（24 小时内有效）')
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : '获取云盘链接失败', true)
+    }
+  }
+
+  const onRetryAsset = async (r: AssetRecord) => {
+    setBusy(true)
+    try {
+      await window.dst.retryAssetRecord(r.id)
+      showToast('已重试')
+      await loadAssets()
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : '重试失败', true)
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -1220,33 +1485,28 @@ export default function App() {
               ))}
             </div>
             <div className="sidebar-footer">
-              <span>v{version || '…'}</span>
-              <div className="footer-actions">
-                <button
-                  className="icon-entry"
-                  onClick={() => setView('sessions')}
-                  title="会话管理"
-                  aria-label="会话管理"
-                >
+              <nav className="footer-menu">
+                <button className="menu-entry" onClick={() => setView('sessions')}>
                   <SessionIcon />
+                  <span>会话管理</span>
                 </button>
-                <button
-                  className="icon-entry"
-                  onClick={() => setView('prompts')}
-                  title="提示词管理"
-                  aria-label="提示词管理"
-                >
+                <button className="menu-entry" onClick={() => setView('prompts')}>
                   <PromptIcon />
+                  <span>提示词管理</span>
+                </button>
+                <button className="menu-entry" onClick={() => setView('assets')}>
+                  <ArchiveIcon />
+                  <span>生成记录</span>
                 </button>
                 <button
-                  className={`icon-entry ${showSettings ? 'active' : ''}`}
+                  className={`menu-entry ${showSettings ? 'active' : ''}`}
                   onClick={() => setView('settings')}
-                  title="设置"
-                  aria-label="设置"
                 >
                   <SettingsIcon />
+                  <span>设置</span>
                 </button>
-              </div>
+              </nav>
+              <span className="footer-version">v{version || '…'}</span>
             </div>
           </aside>
         )}
@@ -1259,7 +1519,7 @@ export default function App() {
                 <div>
                   <h2>设置</h2>
                   <div className="sub" style={{ color: 'var(--muted)', fontSize: 13 }}>
-                    Provider、MCP 服务、版本更新与窗口行为
+                    通用、Provider、MCP、应用、路由与关于
                   </div>
                 </div>
                 <div className="actions">
@@ -1268,7 +1528,21 @@ export default function App() {
                   </button>
                 </div>
               </div>
+              <div className="tab-bar settings-tab-bar">
+                {SETTINGS_TABS.map((tab) => (
+                  <button
+                    key={tab.id}
+                    className={`tab-item ${settingsTab === tab.id ? 'active' : ''}`}
+                    onClick={() => setSettingsTab(tab.id)}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
               <div className="panel-body settings-page">
+                {/* 区块按 tab 归组，文件顺序：关于 / 应用 / Provider / MCP / 通用 / 路由 */}
+                {settingsTab === 'about' && (
+                <>
                 <section className="settings-section">
                   <h3>版本更新</h3>
                   <p className="settings-desc">当前版本：v{version || '…'} · 检查并安装最新版本。</p>
@@ -1340,6 +1614,27 @@ export default function App() {
                 </section>
 
                 <section className="settings-section">
+                  <h3>应用信息</h3>
+                  <p className="settings-desc">
+                    版本与本地数据存储位置；修改应用配置前会自动备份到数据目录的 backups/ 下。
+                  </p>
+                  <div className="form">
+                    <div className="field">
+                      <label>应用版本</label>
+                      <input value={`v${version || '…'}`} readOnly disabled />
+                    </div>
+                    <div className="field">
+                      <label>数据目录</label>
+                      <input value={dataDir || '…'} readOnly disabled spellCheck={false} />
+                    </div>
+                  </div>
+                </section>
+                </>
+                )}
+
+                {settingsTab === 'apps' && (
+                <>
+                <section className="settings-section">
                   <h3>WorkBuddy 路径</h3>
                   <p className="settings-desc">
                     留空时会自动检测默认目录和系统安装记录；自动检测失败时，再填写安装目录或 WorkBuddy.exe 完整路径。
@@ -1394,7 +1689,11 @@ export default function App() {
                     </div>
                   </div>
                 </section>
+                </>
+                )}
 
+                {settingsTab === 'provider' && (
+                <>
                 <section className="settings-section">
                   <h3>Provider 配置</h3>
                   <p className="settings-desc">所有应用共用这份大算头连接信息；保存后自动同步，无需按应用单独配置。</p>
@@ -1408,7 +1707,7 @@ export default function App() {
                       <input value={form.endpoint} readOnly disabled />
                     </div>
                     <div className="field">
-                      <label>接口协议</label>
+                      <label>上游接口协议</label>
                       <select
                         value={form.wireApi}
                         onChange={(e) =>
@@ -1418,9 +1717,7 @@ export default function App() {
                           }))
                         }
                       >
-                        <option value="chat_completions">
-                          Chat Completions（经 dstAdapter 代理）
-                        </option>
+                        <option value="chat_completions">Chat Completions</option>
                         <option value="responses">Responses（直连）</option>
                       </select>
                     </div>
@@ -1498,6 +1795,69 @@ export default function App() {
                 </section>
 
                 <section className="settings-section">
+                  <h3>AI能力平台配置</h3>
+                  <p className="settings-desc">保存公司AI能力平台的连接凭据；当前仅做配置留存，具体功能后续开放。</p>
+                  <div className="form">
+                    <div className="field">
+                      <label>Base URL</label>
+                      <input
+                        value={assetBaseUrl}
+                        spellCheck={false}
+                        placeholder="例如 https://asset.example.com"
+                        onChange={(e) => setAssetBaseUrl(e.target.value)}
+                      />
+                    </div>
+                    <div className="field">
+                      <label>Key</label>
+                      <input
+                        value={assetKey}
+                        spellCheck={false}
+                        autoComplete="off"
+                        placeholder="访问 Key"
+                        onChange={(e) => setAssetKey(e.target.value)}
+                      />
+                    </div>
+                    <div className="field">
+                      <label>Secret</label>
+                      <div className="api-key-control">
+                        <input
+                          type={showPlainAssetSecret ? 'text' : 'password'}
+                          value={assetSecret}
+                          spellCheck={false}
+                          autoComplete="off"
+                          placeholder="访问 Secret"
+                          onChange={(e) => setAssetSecret(e.target.value)}
+                        />
+                        <button
+                          type="button"
+                          className="api-key-toggle"
+                          disabled={!assetSecret.trim()}
+                          aria-pressed={showPlainAssetSecret}
+                          aria-label={showPlainAssetSecret ? '隐藏 Secret' : '显示 Secret'}
+                          title={showPlainAssetSecret ? '隐藏 Secret' : '显示 Secret'}
+                          onClick={() => setShowPlainAssetSecret(!showPlainAssetSecret)}
+                        >
+                          <EyeIcon hidden={!showPlainAssetSecret} />
+                        </button>
+                      </div>
+                    </div>
+                    <div className="actions settings-actions">
+                      <button
+                        className="btn primary settings-btn"
+                        disabled={busy}
+                        onClick={saveAssetSettings}
+                      >
+                        保存配置
+                      </button>
+                    </div>
+                  </div>
+                </section>
+                </>
+                )}
+
+                {settingsTab === 'mcp' && (
+                <>
+                <section className="settings-section">
                   <h3>MCP 设置</h3>
                   <p className="settings-desc">启动或停止本机 MCP HTTP 服务。打开软件后会自动启动，无需手动点击。</p>
                   {builtinMcpServices.length === 0 ? (
@@ -1525,46 +1885,50 @@ export default function App() {
                                 </>
                               )}
                             </h4>
-                            {s.type === 'ue-mcp' ? (
-                              <div className="row settings-actions">
-                                <button
-                                  className="btn primary settings-btn"
-                                  disabled={busy}
-                                  onClick={() =>
-                                    onUemcpEnable(
-                                      s,
-                                      currentApp === 'codex' ? 'codex' : 'workbuddy'
-                                    )
-                                  }
-                                >
-                                  启用配置
-                                </button>
-                              </div>
-                            ) : (
-                              <div className="row settings-actions">
-                                <button
-                                  className="btn primary settings-btn"
-                                  disabled={busy}
-                                  onClick={() => onMcpStart(s)}
-                                >
-                                  启动服务
-                                </button>
-                                <button
-                                  className="btn danger settings-btn"
-                                  disabled={busy}
-                                  onClick={() => onMcpStop(s)}
-                                >
-                                  停止服务
-                                </button>
-                              </div>
-                            )}
                           </div>
+                          {s.type === 'ue-mcp' ? (
+                            <div className="row settings-actions">
+                              <button
+                                className="btn primary settings-btn"
+                                disabled={busy}
+                                onClick={() =>
+                                  onUemcpEnable(
+                                    s,
+                                    currentApp === 'codex' ? 'codex' : 'workbuddy'
+                                  )
+                                }
+                              >
+                                启用配置
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="row settings-actions">
+                              <button
+                                className="btn primary settings-btn"
+                                disabled={busy}
+                                onClick={() => onMcpStart(s)}
+                              >
+                                启动服务
+                              </button>
+                              <button
+                                className="btn danger settings-btn"
+                                disabled={busy}
+                                onClick={() => onMcpStop(s)}
+                              >
+                                停止服务
+                              </button>
+                            </div>
+                          )}
                         </div>
                       ))}
                     </div>
                   )}
                 </section>
+                </>
+                )}
 
+                {settingsTab === 'general' && (
+                <>
                 <section className="settings-section">
                   <h3>窗口行为</h3>
                   <p className="settings-desc">设置是否在系统登录后自动启动本应用。</p>
@@ -1582,6 +1946,53 @@ export default function App() {
                     </button>
                   </div>
                 </section>
+                </>
+                )}
+
+                {settingsTab === 'routing' && (
+                <>
+                <section className="settings-section">
+                  <h3>路由</h3>
+                  <p className="settings-desc">
+                    控制各应用的请求是否经过本地代理做协议转换；关闭后应用按上游协议直连网关。保存后自动重写应用配置。
+                  </p>
+                  {(Object.keys(ROUTING_CONVERSION_SUPPORT) as AppId[]).map((app) => {
+                    const support = ROUTING_CONVERSION_SUPPORT[app]!
+                    const checked = settings?.routing?.[app] ?? DEFAULT_SETTINGS.routing[app] ?? false
+                    const noConversionNeeded = settings?.providerWireApi === 'responses'
+                    const staticallyDisabled =
+                      !support.available || (app === 'codex' && noConversionNeeded)
+                    const disabled = busy || staticallyDisabled
+                    const hint = !support.available
+                      ? '即将支持'
+                      : app === 'codex' && noConversionNeeded
+                        ? '当前上游为 Responses，无需转换'
+                        : support.direction === 'responses→chat'
+                          ? '经本地代理将 Codex 的 Responses 请求转换为 Chat Completions'
+                          : '经本地代理将 Chat Completions 请求转换为 Responses'
+                    return (
+                      <div className="settings-switch-row" key={app}>
+                        <span>{APP_META[app].name}</span>
+                        <span className="settings-desc routing-hint">{hint}</span>
+                        <button
+                          type="button"
+                          className={`switch${checked && support.available ? ' on' : ''}${
+                            staticallyDisabled && !busy ? ' static-disabled' : ''
+                          }`}
+                          role="switch"
+                          aria-checked={checked && support.available}
+                          aria-label={`${APP_META[app].name} 路由代理`}
+                          disabled={disabled}
+                          onClick={() => toggleRouting(app)}
+                        >
+                          <span className="switch-knob" />
+                        </button>
+                      </div>
+                    )
+                  })}
+                </section>
+                </>
+                )}
               </div>
             </>
           ) : view === 'sessions' ? (
@@ -1598,13 +2009,6 @@ export default function App() {
                   <div className="actions">
                     <button className="btn" onClick={closeSessionDetail}>
                       ← 返回列表
-                    </button>
-                    <button
-                      className="btn danger"
-                      onClick={() => onDeleteSession(openSession)}
-                      disabled={sessionBusy}
-                    >
-                      删除会话
                     </button>
                   </div>
                 </div>
@@ -1722,16 +2126,6 @@ export default function App() {
                                 <span>{formatSessionTime(s.lastActiveAt)}</span>
                               </div>
                             </div>
-                            <button
-                              className="btn danger session-delete"
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                onDeleteSession(s)
-                              }}
-                              disabled={sessionBusy}
-                            >
-                              删除
-                            </button>
                           </div>
                         ))}
                         {listVisible < sessionList.length && (
@@ -1754,7 +2148,7 @@ export default function App() {
                 <div>
                   <h2>提示词管理</h2>
                   <div className="sub" style={{ color: 'var(--muted)', fontSize: 13 }}>
-                    维护个人常用提示词，使用公司统一模板
+                    个人提示词与公司统一模板同步自 AI 能力平台
                   </div>
                 </div>
                 <div className="actions">
@@ -1763,6 +2157,9 @@ export default function App() {
                       + 新建提示词
                     </button>
                   )}
+                  <button className="btn settings-btn" onClick={() => void loadPrompts()}>
+                    刷新
+                  </button>
                   <button className="btn settings-btn" onClick={() => setView('home')}>
                     ← 返回主页
                   </button>
@@ -1789,8 +2186,8 @@ export default function App() {
                     className="search-input"
                     placeholder={
                       promptTab === 'personal'
-                        ? '搜索我的提示词（名称 / 内容）...'
-                        : '搜索公司模板（名称 / 描述）...'
+                        ? '搜索我的提示词（名称 / 内容 / 标签）...'
+                        : '搜索公司模板（名称 / 简介 / 标签 / 类目）...'
                     }
                     value={promptSearch}
                     onChange={(e) => setPromptSearch(e.target.value)}
@@ -1801,7 +2198,20 @@ export default function App() {
                     <div className="empty">正在读取提示词…</div>
                   ) : filteredPrompts.length === 0 ? (
                     <div className="empty">
-                      {promptSearch.trim() ? (
+                      {promptsError ? (
+                        <>
+                          <div className="empty-icon">⚠️</div>
+                          <div>{promptsError}</div>
+                          <div className="row mcp-actions" style={{ justifyContent: 'center' }}>
+                            <button className="btn" onClick={() => void loadPrompts()}>
+                              重试
+                            </button>
+                            <button className="btn primary" onClick={() => setView('settings')}>
+                              去设置
+                            </button>
+                          </div>
+                        </>
+                      ) : promptSearch.trim() ? (
                         <>没有匹配 “{promptSearch.trim()}” 的提示词</>
                       ) : (
                         <>
@@ -1820,13 +2230,21 @@ export default function App() {
                             setViewingPrompt({
                               name: p.name,
                               content: p.content,
+                              tags: p.tags,
                               source: 'personal',
                               prompt: p
                             })
                           }
                         >
                           <div>
-                            <h4>{p.name}</h4>
+                            <h4>
+                              {p.name}
+                              {(p.tags ?? []).map((t) => (
+                                <span key={t} className="badge prompt-tag">
+                                  {t}
+                                </span>
+                              ))}
+                            </h4>
                             <div className="prompt-content-preview">{p.content}</div>
                             <div className="sub">更新于 {formatSessionTime(p.updatedAt)}</div>
                             <div className="row mcp-actions" onClick={(e) => e.stopPropagation()}>
@@ -1852,49 +2270,228 @@ export default function App() {
                       ))}
                     </div>
                   )
-                ) : filteredTemplates.length === 0 ? (
-                  <div className="empty">没有匹配 “{promptSearch.trim()}” 的公司模板</div>
+                ) : templatesLoading ? (
+                  <div className="empty">正在读取公司模板…</div>
+                ) : (
+                  <>
+                    {templatesFallback && (
+                      <div className="empty" style={{ padding: '8px 0' }}>
+                        ⚠️ 平台模板拉取失败（未配置或网络异常），当前展示内置模板
+                      </div>
+                    )}
+                    <div className="session-toolbar">
+                      <div className="chip-row">
+                        <button
+                          className={`chip ${templateCategory === 'all' ? 'active' : ''}`}
+                          onClick={() => setTemplateCategory('all')}
+                        >
+                          全部
+                        </button>
+                        {TEMPLATE_CATEGORY_BUCKETS.map((b) => (
+                          <button
+                            key={b.id}
+                            className={`chip ${templateCategory === b.id ? 'active' : ''}`}
+                            onClick={() => setTemplateCategory(b.id)}
+                          >
+                            {b.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    {filteredTemplates.length === 0 ? (
+                      <div className="empty">
+                        {templates.length === 0
+                          ? '平台暂无上架的公司模板'
+                          : promptSearch.trim()
+                            ? `没有匹配 “${promptSearch.trim()}” 的公司模板`
+                            : '该类目下暂无模板'}
+                      </div>
+                    ) : (
+                      <div className="list">
+                        {filteredTemplates.map((t) => (
+                          <div
+                            key={t.id}
+                            className="card prompt-card"
+                            onClick={() =>
+                              setViewingPrompt({
+                                name: t.name,
+                                description: t.description,
+                                content: t.content,
+                                tags: t.tags,
+                                source: 'company',
+                                template: t
+                              })
+                            }
+                          >
+                            <div>
+                              <h4>
+                                {t.name}
+                                <span className="badge builtin">
+                                  {templatesFallback ? '内置模板' : '公司模板'}
+                                </span>
+                                {t.category && <span className="badge prompt-tag">{t.category}</span>}
+                                {t.targetWorkflow && (
+                                  <span className="badge prompt-tag">{t.targetWorkflow}</span>
+                                )}
+                                {(t.tags ?? []).map((tag) => (
+                                  <span key={tag} className="badge prompt-tag">
+                                    {tag}
+                                  </span>
+                                ))}
+                              </h4>
+                              <div className="sub">{t.description}</div>
+                              <div className="prompt-content-preview">{t.content}</div>
+                              <div className="row mcp-actions" onClick={(e) => e.stopPropagation()}>
+                                <button
+                                  className="btn primary"
+                                  onClick={() => onCopyPrompt(t.content)}
+                                >
+                                  使用
+                                </button>
+                                <button
+                                  className="btn"
+                                  disabled={promptBusy}
+                                  onClick={() => onSaveTemplateAsPersonal(t)}
+                                >
+                                  另存为个人提示词
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            </>
+          ) : view === 'assets' ? (
+            <>
+              <div className="panel-head">
+                <div>
+                  <h2>生成记录</h2>
+                  <div className="sub" style={{ color: 'var(--muted)', fontSize: 13 }}>
+                    MCP 工具生成的图片、视频与 3D 模型自动归档到云盘
+                  </div>
+                </div>
+                <div className="actions">
+                  <button className="btn settings-btn" onClick={() => void loadAssets()}>
+                    刷新
+                  </button>
+                  <button className="btn settings-btn" onClick={() => setView('home')}>
+                    ← 返回主页
+                  </button>
+                </div>
+              </div>
+              <div className="panel-body session-page">
+                <div className="session-toolbar">
+                  <div className="chip-row">
+                    {ASSET_KIND_OPTIONS.map((opt) => (
+                      <button
+                        key={opt.id}
+                        className={`chip ${assetKindFilter === opt.id ? 'active' : ''}`}
+                        onClick={() => {
+                          setAssetKindFilter(opt.id)
+                          setAssetListVisible(60)
+                        }}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                  <input
+                    type="text"
+                    className="search-input"
+                    placeholder="搜索提示词 / 生成人 / 工具..."
+                    value={assetSearch}
+                    onChange={(e) => {
+                      setAssetSearch(e.target.value)
+                      setAssetListVisible(60)
+                    }}
+                  />
+                </div>
+                {assetsLoading && assetRecords.length === 0 ? (
+                  <div className="empty">正在读取生成记录…</div>
+                ) : filteredAssetRecords.length === 0 ? (
+                  <div className="empty">
+                    {assetSearch.trim() || assetKindFilter !== 'all' ? (
+                      <>没有匹配的生成记录</>
+                    ) : (
+                      <>
+                        <div className="empty-icon">🖼</div>
+                        还没有生成记录；使用 MCP 生成工具（图片 / 视频 / 3D）后自动归档
+                      </>
+                    )}
+                  </div>
                 ) : (
                   <div className="list">
-                    {filteredTemplates.map((t) => (
-                      <div
-                        key={t.id}
-                        className="card prompt-card"
-                        onClick={() =>
-                          setViewingPrompt({
-                            name: t.name,
-                            description: t.description,
-                            content: t.content,
-                            source: 'company',
-                            template: t
-                          })
-                        }
-                      >
+                    {filteredAssetRecords.slice(0, assetListVisible).map((r) => (
+                      <div key={r.id} className="card asset-card">
                         <div>
                           <h4>
-                            {t.name}
-                            <span className="badge builtin">公司模板</span>
+                            <span className="badge builtin">{ASSET_KIND_LABELS[r.kind]}</span>
+                            <span className={`asset-status asset-status-${r.status}`}>
+                              {ASSET_STATUS_LABELS[r.status]}
+                            </span>
                           </h4>
-                          <div className="sub">{t.description}</div>
-                          <div className="prompt-content-preview">{t.content}</div>
-                          <div className="row mcp-actions" onClick={(e) => e.stopPropagation()}>
-                            <button
-                              className="btn primary"
-                              onClick={() => onCopyPrompt(t.content)}
-                            >
-                              使用
-                            </button>
-                            <button
-                              className="btn"
-                              disabled={promptBusy}
-                              onClick={() => onSaveTemplateAsPersonal(t)}
-                            >
-                              另存为个人提示词
-                            </button>
+                          <div className="prompt-content-preview" title={r.prompt}>
+                            {r.prompt || '（无提示词）'}
+                          </div>
+                          <div className="sub">
+                            {r.identity?.displayName || '未知用户'}
+                            {r.identity?.orgName ? ` · ${r.identity.orgName}` : ''} ·{' '}
+                            {r.sourceApp} · {r.toolName}
+                            {r.model ? ` · ${r.model}` : ''} · {formatSessionTime(r.createdAt)}
+                          </div>
+                          {r.error && <div className="sub asset-error">{r.error}</div>}
+                          {r.status === 'completed' && r.archive?.status === 'failed' && (
+                            <div className="sub asset-error">
+                              AI 能力平台数据归档失败：{r.archive.error || '未知错误'}
+                            </div>
+                          )}
+                          <div className="row mcp-actions">
+                            {r.status === 'completed' && r.cloud && (
+                              <>
+                                <button className="btn primary" onClick={() => void onOpenAssetUrl(r)}>
+                                  打开链接
+                                </button>
+                                <button className="btn" onClick={() => void onCopyAssetUrl(r)}>
+                                  复制链接
+                                </button>
+                              </>
+                            )}
+                            {r.status === 'upload_failed' && (
+                              <button
+                                className="btn primary"
+                                disabled={busy}
+                                onClick={() => void onRetryAsset(r)}
+                              >
+                                重试上传
+                              </button>
+                            )}
+                            {r.status === 'completed' &&
+                              r.archive?.status === 'failed' &&
+                              r.cloud?.logicalKey && (
+                                <button
+                                  className="btn primary"
+                                  disabled={busy}
+                                  onClick={() => void onRetryAsset(r)}
+                                >
+                                  重试数据归档
+                                </button>
+                              )}
                           </div>
                         </div>
                       </div>
                     ))}
+                    {assetListVisible < filteredAssetRecords.length && (
+                      <button
+                        className="btn load-earlier"
+                        onClick={() => setAssetListVisible((n) => n + 60)}
+                      >
+                        ↓ 加载更多（还有 {filteredAssetRecords.length - assetListVisible} 条记录）
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
@@ -1967,7 +2564,7 @@ export default function App() {
                 <div className="feature-banner">
                   <div>
                     <strong>纯 API 模式</strong>
-                    <span>无需 OpenAI 账号；启用后由大算头 Provider 提供模型。</span>
+                    <span>无需 OpenAI 账号；可同时启用多个模型，在 Codex 内自由切换。</span>
                   </div>
                 </div>
               )}
@@ -2028,8 +2625,14 @@ export default function App() {
                           className={`model-card ${model.enabled ? 'enabled' : ''}`}
                         >
                           <div className="model-card-header">
-                            <h4>{model.name || model.modelId}</h4>
-                            {model.enabled && <span className="badge ok">已启用</span>}
+                            <h4>
+                              {model.name || model.modelId}
+                              {model.enabled ? (
+                                <span className="badge ok">已启用</span>
+                              ) : (
+                                <span className="badge">已停用</span>
+                              )}
+                            </h4>
                           </div>
                           <div className="model-card-body">
                             <div className="model-id">{model.modelId}</div>
@@ -2145,16 +2748,16 @@ export default function App() {
                         {filteredMcpServices.map((s) => (
                           <div
                             key={s.id}
-                            className={`card ${s.enabledForCurrentApp ? 'enabled' : ''}`}
+                            className={`card mcp-card ${s.enabledForCurrentApp ? 'enabled' : ''}`}
                           >
                             <div>
                               <h4>
                                 {s.name}
                                 <span className="badge builtin">内置</span>
                                 {s.enabledForCurrentApp ? (
-                                  <span className="badge ok">当前应用已启用</span>
+                                  <span className="badge ok">已启用</span>
                                 ) : (
-                                  <span className="badge">当前应用未启用</span>
+                                  <span className="badge">已停用</span>
                                 )}
                               </h4>
                               <div className="sub">
@@ -2163,24 +2766,24 @@ export default function App() {
                               <div className="sub">
                                 {mcpCapability(s, currentApp)}
                               </div>
-                              <div className="row mcp-actions">
-                                <button
-                                  className="btn primary"
-                                  disabled={busy}
-                                  onClick={() =>
-                                    onUemcpEnable(s, currentApp)
-                                  }
-                                >
-                                  启用
-                                </button>
-                                <button
-                                  className="btn danger"
-                                  disabled={busy}
-                                  onClick={() => onMcpEnable(s, false)}
-                                >
-                                  停用
-                                </button>
-                              </div>
+                            </div>
+                            <div className="row mcp-actions">
+                              <button
+                                className="btn primary"
+                                disabled={busy}
+                                onClick={() =>
+                                  onUemcpEnable(s, currentApp)
+                                }
+                              >
+                                启用
+                              </button>
+                              <button
+                                className="btn danger"
+                                disabled={busy}
+                                onClick={() => onMcpEnable(s, false)}
+                              >
+                                停用
+                              </button>
                             </div>
                           </div>
                         ))}
@@ -2258,12 +2861,21 @@ export default function App() {
                       {filteredSkills.map((skill: RemoteSkillPackage) => (
                       <div
                         key={`${skill.id}-${skill.version}`}
-                        className={`card ${skill.installed && skill.enabled ? 'enabled' : ''}`}
+                        className={`card skill-card ${skill.installed && skill.enabled ? 'enabled' : ''}`}
                       >
                         <div>
                           <h4>
                             {skill.name}
                             <span className="badge">v{skill.version}</span>
+                            {!skill.installed && <span className="badge">未安装</span>}
+                            {skill.installed && (
+                              skill.enabled ? (
+                                <span className="badge ok">已启用</span>
+                              ) : (
+                                <span className="badge">已停用</span>
+                              )
+                            )}
+                            {skill.updateAvailable && <span className="badge warn">可更新</span>}
                           </h4>
                           {skill.description && <div className="sub">{skill.description}</div>}
                           <div className="sub">
@@ -2279,52 +2891,40 @@ export default function App() {
                               .filter(Boolean)
                               .join(' · ')}
                           </div>
-                          <div className="row mcp-actions">
+                        </div>
+                        <div className="row mcp-actions">
+                          <button
+                            className="btn primary"
+                            disabled={!skill.installed || skill.enabled || skillAction === skill.id}
+                            onClick={() => onSetSkillEnabled(skill.id, true)}
+                          >
+                            启用
+                          </button>
+                          <button
+                            className="btn danger"
+                            disabled={!skill.installed || !skill.enabled || skillAction === skill.id}
+                            onClick={() => onSetSkillEnabled(skill.id, false)}
+                          >
+                            停用
+                          </button>
+                          {!skill.installed && (
                             <button
                               className="btn primary"
-                              disabled={!skill.installed || skill.enabled || skillAction === skill.id}
-                              onClick={() => onSetSkillEnabled(skill.id, true)}
+                              disabled={skillAction === skill.id}
+                              onClick={() => onUpdateSkill(skill)}
                             >
-                              启用
+                              {skillAction === skill.id ? '安装中...' : '安装'}
                             </button>
+                          )}
+                          {skill.installed && skill.updateAvailable && (
                             <button
-                              className="btn danger"
-                              disabled={!skill.installed || !skill.enabled || skillAction === skill.id}
-                              onClick={() => onSetSkillEnabled(skill.id, false)}
+                              className="btn primary"
+                              disabled={skillAction === skill.id}
+                              onClick={() => onUpdateSkill(skill)}
                             >
-                              停用
+                              {skillAction === skill.id ? '更新中...' : '更新'}
                             </button>
-                            {!skill.installed && (
-                              <button
-                                className="btn primary"
-                                disabled={skillAction === skill.id}
-                                onClick={() => onUpdateSkill(skill)}
-                              >
-                                {skillAction === skill.id ? '安装中...' : '安装'}
-                              </button>
-                            )}
-                            {skill.installed && skill.updateAvailable && (
-                              <button
-                                className="btn primary"
-                                disabled={skillAction === skill.id}
-                                onClick={() => onUpdateSkill(skill)}
-                              >
-                                {skillAction === skill.id ? '更新中...' : '更新'}
-                              </button>
-                            )}
-                            {!skill.installed && <span className="badge">未安装</span>}
-                            {skill.installed && (
-                              skill.enabled ? (
-                                <span className="badge ok">已启用</span>
-                              ) : (
-                                <span className="badge">已停用</span>
-                              )
-                            )}
-                            {skill.localVersion && (
-                              <span className="badge">本地 v{skill.localVersion}</span>
-                            )}
-                            {skill.updateAvailable && <span className="badge warn">可更新</span>}
-                          </div>
+                          )}
                         </div>
                       </div>
                     ))}
@@ -2344,7 +2944,7 @@ export default function App() {
           )}
 
           <p className="footer-note">
-            dst adapter v{version || '…'} · 本地数据目录：{dataDir || '...'}
+            Up software Ai控制台 v{version || '…'} · 本地数据目录：{dataDir || '...'}
             （备份在 backups/ 下）
           </p>
         </main>
@@ -2457,7 +3057,7 @@ export default function App() {
                 <input
                   type="text"
                   value={promptForm.name}
-                  maxLength={50}
+                  maxLength={64}
                   placeholder="例如：周报生成"
                   onChange={(e) => setPromptForm((s) => ({ ...s, name: e.target.value }))}
                 />
@@ -2471,6 +3071,15 @@ export default function App() {
                   value={promptForm.content}
                   placeholder="提示词正文，支持多行"
                   onChange={(e) => setPromptForm((s) => ({ ...s, content: e.target.value }))}
+                />
+              </div>
+              <div className="field">
+                <label>标签（可选，逗号分隔）</label>
+                <input
+                  type="text"
+                  value={promptForm.tags}
+                  placeholder="例如：图像, 仙侠, 立绘"
+                  onChange={(e) => setPromptForm((s) => ({ ...s, tags: e.target.value }))}
                 />
               </div>
               <div className="actions">
@@ -2503,7 +3112,25 @@ export default function App() {
                 {viewingPrompt.description}
               </div>
             )}
-            <pre className="prompt-detail-content">{viewingPrompt.content}</pre>
+            {(viewingPrompt.tags ?? []).length > 0 && (
+              <div className="prompt-tags-row">
+                {viewingPrompt.tags!.map((t) => (
+                  <span key={t} className="badge prompt-tag">
+                    {t}
+                  </span>
+                ))}
+              </div>
+            )}
+            <div className="prompt-detail-content">
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm, remarkBreaks]}
+                components={{
+                  a: (props) => <a {...props} target="_blank" rel="noreferrer" />
+                }}
+              >
+                {viewingPrompt.content}
+              </ReactMarkdown>
+            </div>
             <div className="actions">
               <button className="btn" onClick={() => setViewingPrompt(null)}>
                 关闭

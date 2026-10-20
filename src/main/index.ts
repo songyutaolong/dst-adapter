@@ -14,6 +14,9 @@ import { parseDeepLink } from '../shared/url'
 import type { AppId } from '../shared/types'
 import { stopCodexProxy } from './codex/proxy'
 import { launchMcpService, getMcpRuntime } from './mcp/launcher'
+import { setToolCallHook, queryVideoTask, query3DGenerationTask } from './mcp/server'
+import { archiveToolCall, flushAssetRecordsSync, initAssetArchiver } from './assets/archive'
+import { initSessionArchive } from './sessionArchive'
 import { initUpdater } from './update'
 import { applyLaunchAtLogin } from './login'
 import { migrateLegacySkillWorkDirectories } from './skills/maintenance'
@@ -22,6 +25,9 @@ import { BUILTIN_MCP_UEMCP_ID } from '../shared/types'
 
 let mainWindow: BrowserWindow | null = null
 let pendingDeepLink: string | null = null
+
+// dev 模式下Electron 取 package.json name 作为应用名, 统一成产品名
+app.setName('Up software Ai控制台')
 
 async function maintainWorkBuddySkills(): Promise<void> {
   try {
@@ -107,7 +113,7 @@ function createWindow(): void {
     minWidth: 800,
     minHeight: 560,
     show: false,
-    title: `dst adapter v${app.getVersion()}`,
+    title: 'Up software Ai控制台',
     ...(icon ? { icon } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -214,6 +220,17 @@ app.whenReady().then(async () => {
   if (fromArgv) handleDeepLink(fromArgv)
   if (pendingDeepLink) handleDeepLink(pendingDeepLink)
 
+  // 生成资产自动归档：tools/call 钩子 + 轮询器（依赖注入，避免与 server.ts 循环依赖）
+  initAssetArchiver({
+    getMainWindow: () => mainWindow,
+    queryVideoTask,
+    query3DGenerationTask
+  })
+  setToolCallHook(archiveToolCall)
+
+  // 会话归档：始终开启，平台配置完成后定期把本地会话上报公司 AI 能力平台（增量，5 分钟周期）
+  initSessionArchive({ getMainWindow: () => mainWindow })
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
     else mainWindow?.show()
@@ -222,6 +239,7 @@ app.whenReady().then(async () => {
 
 app.on('before-quit', () => {
   ;(app as typeof app & { isQuitting?: boolean }).isQuitting = true
+  flushAssetRecordsSync()
   void stopCodexProxy()
 })
 

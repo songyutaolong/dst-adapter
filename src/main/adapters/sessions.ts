@@ -7,7 +7,8 @@ import type {
   SessionMeta,
   SessionMessage,
   SessionMessagesOptions,
-  SessionMessagesPage
+  SessionMessagesPage,
+  SessionToolCall
 } from '../../shared/types'
 
 /**
@@ -162,10 +163,38 @@ function extractText(content: unknown): string {
 }
 
 // 应用注入的上下文包裹不是用户真实输入，标题/摘要/消息展示均跳过
-function isNoiseText(text: string): boolean {
-  return /^<(system-reminder|app-context|environment_context|user_context|ide_context|app-state|permissions)/i.test(
-    text.trimStart()
-  )
+
+/**
+ * 提取一条消息的真实输入正文：把开头的应用注入上下文块（environment_context /
+ * system-reminder / AGENTS.md instructions / turn_aborted 等）剥掉，保留其后用户真话；
+ * WorkBuddy 的真实输入常包在 <user_query>…</user_query> 里，优先取出。只剩噪声（无真话）时返回空串。
+ */
+function cleanMessageText(text: string): string {
+  const source = text.trimStart()
+  // WorkBuddy：<user_query>…</user_query> 内的内容即真实输入（可能夹在上下文块里）
+  const uq = source.match(/<user_query[^>]*>([\s\S]*?)<\/user_query>/i)
+  if (uq && uq[1].trim()) return uq[1].trim()
+
+  const CONTEXT_TAGS = [
+    'environment_context', 'system-reminder', 'app-context', 'user_context',
+    'ide_context', 'app-state', 'instructions', 'turn_aborted',
+    'in-app-browser-context', 'codex_internal_context'
+  ]
+  // '# AGENTS.md instructions for <路径>' 标题行是注入前缀，剥掉后 <INSTRUCTIONS> 块交给下方标签循环
+  let s = source.replace(/^#[ \t]*AGENTS\.md instructions for [^\n]*\n?/i, '').trimStart()
+  for (;;) {
+    const m = s.match(/^<([a-zA-Z][\w-]*)(?:\s[^>]*)?>([\s\S]*?)<\/\1>\s*/i)
+    if (!m || !CONTEXT_TAGS.includes(String(m[1]).toLowerCase())) break
+    s = s.slice(m[0].length).trimStart()
+  }
+  // 未闭合的上下文标签（如 <environment_context> 后无 </…>）：剥到内容里第一个实质行
+  for (;;) {
+    const open = s.match(/^<([a-zA-Z][\w-]*)(?:\s[^>]*)?>/)
+    if (!open || !CONTEXT_TAGS.includes(String(open[1]).toLowerCase())) break
+    const nl = s.indexOf('\n')
+    s = (nl >= 0 ? s.slice(nl + 1) : '').trimStart()
+  }
+  return s.trim()
 }
 
 function truncate(text: string, max: number): string {
@@ -280,8 +309,8 @@ function parseWorkBuddySessionMeta(
       aiTitle = row.aiTitle.trim()
     }
     if (!firstUserText && row.type === 'message' && row.role === 'user') {
-      const text = extractText(row.content)
-      if (text && !isNoiseText(text)) firstUserText = text
+      const text = cleanMessageText(extractText(row.content))
+      if (text) firstUserText = text
     }
   }
 
@@ -296,8 +325,8 @@ function parseWorkBuddySessionMeta(
       row.type === 'message' &&
       (row.role === 'user' || row.role === 'assistant')
     ) {
-      const text = extractText(row.content)
-      if (text && !isNoiseText(text)) lastText = text
+      const text = cleanMessageText(extractText(row.content))
+      if (text) lastText = text
     }
     if (lastActiveAt && lastText) break
   }
@@ -372,10 +401,15 @@ function parseWorkBuddyLine(line: string, state: WorkBuddyParseState): void {
   if (row.type === 'function_call') {
     const name = typeof row.name === 'string' && row.name ? row.name : '工具'
     const args = summarizeToolArgs(row.arguments)
+    const toolCall: SessionToolCall = {
+      name,
+      ...(args ? { args: truncateBlock(args, 200) } : {})
+    }
     messages.push({
       role: 'tool',
       text: args ? `⚡ ${name}\n${args}` : `⚡ ${name}`,
-      timestamp: epochMsToIso(row.timestamp)
+      timestamp: epochMsToIso(row.timestamp),
+      toolCalls: [toolCall]
     })
     if (typeof row.callId === 'string') toolCalls.set(row.callId, messages.length - 1)
     return
@@ -386,9 +420,16 @@ function parseWorkBuddyLine(line: string, state: WorkBuddyParseState): void {
     const idx = typeof row.callId === 'string' ? toolCalls.get(row.callId) : undefined
     if (idx !== undefined) {
       messages[idx].text += `\n${suffix}`
+      const toolCall = messages[idx].toolCalls?.[0]
+      if (toolCall) toolCall.result = output || undefined
     } else {
       const name = typeof row.name === 'string' && row.name ? row.name : '工具'
-      messages.push({ role: 'tool', text: `⚡ ${name}\n${suffix}`, timestamp: epochMsToIso(row.timestamp) })
+      messages.push({
+        role: 'tool',
+        text: `⚡ ${name}\n${suffix}`,
+        timestamp: epochMsToIso(row.timestamp),
+        toolCalls: [{ name, result: output || undefined }]
+      })
     }
     return
   }
@@ -405,8 +446,8 @@ function parseWorkBuddyLine(line: string, state: WorkBuddyParseState): void {
   }
   if (row.type !== 'message') return
   if (row.role !== 'user' && row.role !== 'assistant') return
-  const text = extractText(row.content)
-  if (!text || isNoiseText(text)) return
+  const text = cleanMessageText(extractText(row.content))
+  if (!text) return
   messages.push({ role: row.role, text, timestamp: epochMsToIso(row.timestamp) })
 }
 
@@ -559,8 +600,8 @@ function parseCodexSessionMeta(
       payload.type === 'message' &&
       payload.role === 'user'
     ) {
-      const text = extractText(payload.content)
-      if (text && !isNoiseText(text)) firstUserText = text
+      const text = cleanMessageText(extractText(payload.content))
+      if (text) firstUserText = text
     }
   }
 
@@ -629,7 +670,8 @@ function parseCodexLine(line: string, state: CodexParseState): void {
     messages.push({
       role: 'tool',
       text: args ? `⚡ ${name}\n${args}` : `⚡ ${name}`,
-      timestamp: ts
+      timestamp: ts,
+      toolCalls: [{ name, ...(args ? { args: truncateBlock(args, 200) } : {}) }]
     })
     if (typeof payload.call_id === 'string') toolCalls.set(payload.call_id, messages.length - 1)
     return
@@ -640,10 +682,16 @@ function parseCodexLine(line: string, state: CodexParseState): void {
     const input = typeof payload.input === 'string' ? payload.input : ''
     const summary = summarizePatch(input)
     const body = truncateBlock(input, 600)
+    const toolCall: SessionToolCall = {
+      name,
+      ...(input ? { args: truncateBlock(input, 200) } : {}),
+      ...(typeof payload.status === 'string' && payload.status ? { status: payload.status } : {})
+    }
     messages.push({
       role: 'tool',
       text: summary ? `✏️ ${name}（${summary}）\n${body}` : `✏️ ${name}\n${body}`,
-      timestamp: ts
+      timestamp: ts,
+      toolCalls: [toolCall]
     })
     if (typeof payload.call_id === 'string') toolCalls.set(payload.call_id, messages.length - 1)
     return
@@ -654,16 +702,23 @@ function parseCodexLine(line: string, state: CodexParseState): void {
     const idx = typeof payload.call_id === 'string' ? toolCalls.get(payload.call_id) : undefined
     if (idx !== undefined) {
       messages[idx].text += `\n${suffix}`
+      const toolCall = messages[idx].toolCalls?.[0]
+      if (toolCall) toolCall.result = output || undefined
     } else {
-      messages.push({ role: 'tool', text: `⚡ 工具\n${suffix}`, timestamp: ts })
+      messages.push({
+        role: 'tool',
+        text: `⚡ 工具\n${suffix}`,
+        timestamp: ts,
+        toolCalls: [{ name: '工具', result: output || undefined }]
+      })
     }
     return
   }
   if (payload.type !== 'message') return
   // developer/system 通道是应用注入的上下文，不属于对话内容
   if (payload.role !== 'user' && payload.role !== 'assistant') return
-  const text = extractText(payload.content)
-  if (!text || isNoiseText(text)) return
+  const text = cleanMessageText(extractText(payload.content))
+  if (!text) return
   messages.push({ role: payload.role, text, timestamp: ts })
 }
 

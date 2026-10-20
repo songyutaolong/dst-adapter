@@ -91,11 +91,70 @@ textarea {
 
 .sidebar-footer {
   flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
   margin-top: 4px;
-  padding: 4px 8px 2px;
+  padding: 6px 4px 2px;
   font-size: 12px;
   color: var(--muted);
   border-top: 1px solid var(--border);
+}
+
+.footer-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.menu-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #f8fafc;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.menu-entry svg {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+.menu-entry:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.menu-entry:hover svg {
+  color: #fff;
+}
+
+.menu-entry.active,
+.menu-entry.active svg {
+  background: var(--accent);
+  color: #fff;
+}
+
+.menu-entry.active {
+  border-color: var(--accent);
+}
+
+.footer-version {
+  padding: 0 8px 2px;
+  font-size: 11px;
+  color: var(--muted);
 }
 
 .sidebar-apps::-webkit-scrollbar {
@@ -305,6 +364,7 @@ textarea {
 .builtin-card {
   border-color: #c4b5fd;
   background: linear-gradient(180deg, #faf8ff 0%, #ffffff 100%);
+  align-items: center;
 }
 
 .builtin-card h4 .badge.builtin {
@@ -516,6 +576,13 @@ textarea {
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 10px;
+}
+
+/* 工具管理 / 技能管理列表：按钮置于卡片右上角 */
+.mcp-card .mcp-actions,
+.skill-card .mcp-actions {
+  margin-top: 0;
+}
   padding-top: 12px;
 }
 
@@ -1032,12 +1099,6 @@ textarea {
   animation: spin 1s linear infinite;
 }
 
-.sidebar-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
 .update-banner {
   display: flex;
   align-items: center;
@@ -1095,38 +1156,6 @@ textarea {
   border-radius: 3px;
   background: #2563eb;
   transition: width 0.2s ease;
-}
-
-.footer-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.icon-entry {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  padding: 0;
-  border: 1px solid var(--border);
-  background: var(--accent-soft);
-  color: var(--accent);
-  border-radius: 8px;
-  cursor: pointer;
-}
-
-.icon-entry svg {
-  width: 15px;
-  height: 15px;
-}
-
-.icon-entry:hover,
-.icon-entry.active {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
 }
 
 .settings-panel .panel-head h2 {
@@ -1248,10 +1277,6 @@ textarea {
   text-overflow: ellipsis;
 }
 
-.session-delete {
-  flex-shrink: 0;
-}
-
 .session-messages {
   display: flex;
   flex-direction: column;
@@ -1340,6 +1365,18 @@ textarea {
   color: var(--muted);
 }
 
+/* 路由开关行内的提示文案（settings-switch-row 中段） */
+.routing-hint {
+  flex: 1;
+  margin: 0;
+  font-weight: 400;
+  text-align: right;
+}
+
+.switch.static-disabled {
+  cursor: not-allowed;
+}
+
 .settings-section .field input,
 .settings-section .field select {
   min-height: 40px;
@@ -1421,6 +1458,68 @@ textarea {
   border-color: #bfdbfe;
 }
 
+.prompt-card h4 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 标签徽标（个人提示词 / 公司模板共用的 tag 展示） */
+.badge.prompt-tag {
+  background: #e0f2fe;
+  color: #0369a1;
+}
+
+.prompt-tags-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0;
+}
+
+/* ── 生成记录 ── */
+
+.asset-card h4 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.asset-status {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+
+.asset-status-pending,
+.asset-status-uploading {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.asset-status-completed {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.asset-status-upload_failed {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.asset-status-failed,
+.asset-status-expired {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.asset-error {
+  color: var(--danger, #b91c1c);
+  margin: 2px 0 4px;
+}
+
 .prompt-content-preview {
   margin: 2px 0 4px;
   font-size: 12px;
@@ -1448,8 +1547,127 @@ textarea {
   font-size: 13px;
   line-height: 1.7;
   font-family: inherit;
-  white-space: pre-wrap;
   word-break: break-word;
+}
+
+.prompt-detail-content > :first-child {
+  margin-top: 0;
+}
+
+.prompt-detail-content > :last-child {
+  margin-bottom: 0;
+}
+
+.prompt-detail-content h1,
+.prompt-detail-content h2,
+.prompt-detail-content h3,
+.prompt-detail-content h4,
+.prompt-detail-content h5,
+.prompt-detail-content h6 {
+  margin: 14px 0 6px;
+  line-height: 1.4;
+  font-weight: 600;
+}
+
+.prompt-detail-content h1 {
+  font-size: 18px;
+}
+
+.prompt-detail-content h2 {
+  font-size: 16px;
+}
+
+.prompt-detail-content h3 {
+  font-size: 14px;
+}
+
+.prompt-detail-content h4,
+.prompt-detail-content h5,
+.prompt-detail-content h6 {
+  font-size: 13px;
+}
+
+.prompt-detail-content p {
+  margin: 6px 0;
+}
+
+.prompt-detail-content ul,
+.prompt-detail-content ol {
+  margin: 6px 0;
+  padding-left: 22px;
+}
+
+.prompt-detail-content li {
+  margin: 3px 0;
+}
+
+.prompt-detail-content blockquote {
+  margin: 8px 0;
+  padding: 4px 12px;
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  border-radius: 0 6px 6px 0;
+  color: var(--muted);
+}
+
+.prompt-detail-content blockquote p {
+  margin: 4px 0;
+}
+
+.prompt-detail-content code {
+  padding: 1px 5px;
+  background: #eef2f7;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+}
+
+.prompt-detail-content pre {
+  margin: 8px 0;
+  padding: 10px 12px;
+  background: #0f172a;
+  color: #e2e8f0;
+  border-radius: 8px;
+  overflow-x: auto;
+}
+
+.prompt-detail-content pre code {
+  padding: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  font-size: 12px;
+  white-space: pre;
+}
+
+.prompt-detail-content table {
+  margin: 8px 0;
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+}
+
+.prompt-detail-content th,
+.prompt-detail-content td {
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  text-align: left;
+}
+
+.prompt-detail-content th {
+  background: #eef2f7;
+  font-weight: 600;
+}
+
+.prompt-detail-content hr {
+  margin: 12px 0;
+  border: none;
+  border-top: 1px solid var(--border);
+}
+
+.prompt-detail-content a {
+  color: var(--accent);
 }
 
 .field textarea {

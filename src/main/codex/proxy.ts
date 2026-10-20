@@ -124,7 +124,10 @@ function inputToMessages(input: any): Array<Record<string, unknown>> {
     }
 
     if (item.type === 'message' || item.role) {
-      const role = item.role || 'user'
+      // Responses API 允许 role "developer"（Codex 桌面版的 app-context 等），
+      // 但 Chat Completions 上游通常只认 system/assistant/user/tool。
+      const rawRole = item.role || 'user'
+      const role = rawRole === 'developer' ? 'system' : rawRole
       messages.push({
         role,
         content: mapContentParts(item.content)
