@@ -1696,7 +1696,6 @@ export default function App() {
                 <>
                 <section className="settings-section">
                   <h3>Provider 配置</h3>
-                  <p className="settings-desc">所有应用共用这份大算头连接信息；保存后自动同步，无需按应用单独配置。</p>
                   <div className="form">
                     <div className="field">
                       <label>名称</label>
@@ -1796,7 +1795,6 @@ export default function App() {
 
                 <section className="settings-section">
                   <h3>AI能力平台配置</h3>
-                  <p className="settings-desc">保存公司AI能力平台的连接凭据；当前仅做配置留存，具体功能后续开放。</p>
                   <div className="form">
                     <div className="field">
                       <label>Base URL</label>
