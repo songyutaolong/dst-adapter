@@ -72,7 +72,7 @@ npm run dist:mac   # macOS（必须在 Mac 上执行）
 
 ## 联网更新（electron-updater）
 
-应用内置自动更新。设置 `DST_UPDATE_BASE_URL` 后，更新源为阿里 OSS 上的静态文件（`latest.yml` 元数据 + 安装包 + blockmap）；未设置时沿用 GitHub Releases 兜底，便于本地和旧流程打包。
+应用内置自动更新。更新源默认为阿里 OSS 上的静态文件（`latest.yml` 元数据 + 安装包 + blockmap）；如需临时切换环境，可用 `DST_UPDATE_BASE_URL` 覆盖默认地址。
 
 ### OSS 更新源
 
@@ -121,7 +121,7 @@ node scripts/publish-oss.mjs `
   --include "latest.yml"
 ```
 
-已在 GitHub 上的旧客户端仍会读取 GitHub feed。保留 workflow 里“Attach to GitHub Release”这一步，让它们先更新到第一个 OSS 配置版；之后的新客户端会读取包内 `app-update.yml` 的 OSS generic feed。
+历史 GitHub feed 客户端仍会读取 GitHub Release。保留 workflow 里“Attach to GitHub Release”这一步，让它们先更新到 OSS 配置版；之后的新客户端会读取包内 `app-update.yml` 的 OSS generic feed。
 
 ### 发布流程（发新版）
 

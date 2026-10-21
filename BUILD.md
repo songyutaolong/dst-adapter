@@ -78,7 +78,7 @@ Error: spawn EPERM
 | 打包产物目录 | `release/` |
 | 应用数据目录 | `~/.dst-adapter/db.json`（MCP 服务配置、Provider、设置） |
 | 生效方式 | 更新 `out/` 后需**重启应用**才加载新产物 |
-| 自动更新 | `release/` 内自动生成 `latest.yml`(win) / `latest-mac.yml`(mac) + `*.blockmap`；配置 `DST_UPDATE_BASE_URL` 后走阿里 OSS，未配置时走 GitHub Releases |
+| 自动更新 | `release/` 内自动生成 `latest.yml`(win) / `latest-mac.yml`(mac) + `*.blockmap`；更新源默认为阿里 OSS，可用 `DST_UPDATE_BASE_URL` 覆盖 |
 
 ## 修改内置图片生成 MCP 服务要点
 

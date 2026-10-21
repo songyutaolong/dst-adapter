@@ -1,27 +1,22 @@
 'use strict'
 
-const ossUpdateBaseUrl = (process.env.DST_UPDATE_BASE_URL || '').trim().replace(/\/+$/, '')
+const defaultOssUpdateBaseUrl =
+  'https://dst-adapter-releases.oss-cn-shanghai.aliyuncs.com/dst-adapter/releases'
+const ossUpdateBaseUrl = (process.env.DST_UPDATE_BASE_URL || defaultOssUpdateBaseUrl)
+  .trim()
+  .replace(/\/+$/, '')
 
 if (ossUpdateBaseUrl && !/^https:\/\//.test(ossUpdateBaseUrl)) {
   throw new Error('DST_UPDATE_BASE_URL must be an https:// URL')
 }
 
-const publish = ossUpdateBaseUrl
-  ? [
-      {
-        provider: 'generic',
-        url: ossUpdateBaseUrl,
-        channel: 'latest'
-      }
-    ]
-  : [
-      {
-        provider: 'github',
-        owner: 'songyutaolong',
-        repo: 'dst-adapter',
-        releaseType: 'release'
-      }
-    ]
+const publish = [
+  {
+    provider: 'generic',
+    url: ossUpdateBaseUrl,
+    channel: 'latest'
+  }
+]
 
 module.exports = {
   appId: 'com.dasuantou.adapter',
