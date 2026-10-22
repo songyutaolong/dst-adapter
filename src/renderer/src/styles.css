@@ -510,6 +510,15 @@ textarea {
   white-space: nowrap;
 }
 
+.feature-banner.error {
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+
+.feature-banner.error strong {
+  color: var(--danger);
+}
+
 .actions {
   display: flex;
   gap: 8px;

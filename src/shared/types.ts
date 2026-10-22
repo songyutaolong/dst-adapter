@@ -406,6 +406,9 @@ export const BUILTIN_MCP_UEMCP_DEFAULTS = {
   args: ['-y', 'ue-mcp']
 }
 
+/** 远端资源配置来源：Provider 网关或 AI 能力平台 */
+export type RemoteConfigSource = 'provider' | 'platform'
+
 export interface AppSettings {
   launchAtLogin: boolean
   backupKeep: number
@@ -419,6 +422,10 @@ export interface AppSettings {
   providerApiKey: string
   providerWireApi: 'responses' | 'chat_completions'
   providerVendor: string
+  /** Skill 仓储配置来源 */
+  skillConfigSource: RemoteConfigSource
+  /** 云空间（COS/OSS）配置来源 */
+  cloudConfigSource: RemoteConfigSource
   /** AI能力平台配置（先实现配置保存，具体使用后续实现） */
   assetBaseUrl: string
   assetKey: string
@@ -438,6 +445,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   providerApiKey: '',
   providerWireApi: 'chat_completions',
   providerVendor: 'dst',
+  skillConfigSource: 'platform',
+  cloudConfigSource: 'platform',
   assetBaseUrl: '',
   assetKey: '',
   assetSecret: '',

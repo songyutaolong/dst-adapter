@@ -8,6 +8,7 @@ import type {
   AssetRecord,
   GatewayMeResult,
   Provider,
+  RemoteConfigSource,
   SettingsRewriteEvent,
   SpeedTestResult,
   McpService,
@@ -273,6 +274,8 @@ export default function App() {
   const [assetKey, setAssetKey] = useState('')
   const [assetSecret, setAssetSecret] = useState('')
   const [showPlainAssetSecret, setShowPlainAssetSecret] = useState(false)
+  const [skillSource, setSkillSource] = useState<RemoteConfigSource>('platform')
+  const [cloudSource, setCloudSource] = useState<RemoteConfigSource>('platform')
   const [busy, setBusy] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [toast, setToast] = useState<{
@@ -565,6 +568,8 @@ export default function App() {
     setAssetKey(appSettings?.assetKey || '')
     setAssetSecret(appSettings?.assetSecret || '')
     setShowPlainAssetSecret(false)
+    setSkillSource(appSettings?.skillConfigSource === 'provider' ? 'provider' : 'platform')
+    setCloudSource(appSettings?.cloudConfigSource === 'provider' ? 'provider' : 'platform')
     setForm({
       name: appSettings?.providerName || existing?.name || 'dst',
       endpoint: appSettings?.providerEndpoint || existing?.endpoint || DEFAULT_PROVIDER_ENDPOINT,
@@ -717,7 +722,9 @@ export default function App() {
         providerEndpoint: form.endpoint.trim() || DEFAULT_PROVIDER_ENDPOINT,
         providerApiKey: finalApiKey,
         providerWireApi: form.wireApi,
-        providerVendor: form.vendor.trim() || 'dst'
+        providerVendor: form.vendor.trim() || 'dst',
+        skillConfigSource: skillSource,
+        cloudConfigSource: cloudSource
       })
       setSettings(next)
       showToast('Provider 配置已保存')
@@ -877,7 +884,9 @@ export default function App() {
       const next = await window.dst.updateSettings({
         assetBaseUrl: baseUrl,
         assetKey: assetKey.trim(),
-        assetSecret: assetSecret.trim()
+        assetSecret: assetSecret.trim(),
+        skillConfigSource: skillSource,
+        cloudConfigSource: cloudSource
       })
       setSettings(next)
       showToast('AI能力平台配置已保存')
@@ -885,6 +894,26 @@ export default function App() {
       showToast(err instanceof Error ? err.message : String(err), true)
     } finally {
       setBusy(false)
+    }
+  }
+
+  const saveConfigSource = async (kind: 'skill' | 'cloud', value: RemoteConfigSource) => {
+    const prev = kind === 'skill' ? skillSource : cloudSource
+    if (prev === value) return
+    if (kind === 'skill') setSkillSource(value)
+    else setCloudSource(value)
+    try {
+      const next = await window.dst.updateSettings(
+        kind === 'skill' ? { skillConfigSource: value } : { cloudConfigSource: value }
+      )
+      setSettings(next)
+      showToast(
+        `${kind === 'skill' ? 'SKILL 源' : '存储空间源'}已切换为${value === 'platform' ? 'AI能力平台' : '大模型网关'}`
+      )
+    } catch (err) {
+      if (kind === 'skill') setSkillSource(prev)
+      else setCloudSource(prev)
+      showToast(err instanceof Error ? err.message : String(err), true)
     }
   }
 
@@ -977,8 +1006,20 @@ export default function App() {
     return `${(size / (1024 * 1024)).toFixed(1)} MB`
   }
 
-  const onRefreshSkills = () => {
-    setSkillReloadToken((token) => token + 1)
+  const onRefreshSkills = async () => {
+    if (skillLoading) return
+    setSkillLoading(true)
+    setSkillError('')
+    try {
+      const result = await window.dst.listSkillCatalog(currentApp, true)
+      setSkillCatalog(result)
+      setSkillError(result.ok ? '' : result.message)
+    } catch (err) {
+      setSkillCatalog(null)
+      setSkillError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setSkillLoading(false)
+    }
   }
 
   const onSetSkillEnabled = async (id: string, enabled: boolean) => {
@@ -1695,7 +1736,7 @@ export default function App() {
                 {settingsTab === 'provider' && (
                 <>
                 <section className="settings-section">
-                  <h3>Provider 配置</h3>
+                  <h3>大模型网关配置</h3>
                   <div className="form">
                     <div className="field">
                       <label>名称</label>
@@ -1848,6 +1889,46 @@ export default function App() {
                         保存配置
                       </button>
                     </div>
+                  </div>
+                </section>
+
+                <section className="settings-section">
+                  <h3>SKILL及存储空间配置</h3>
+                  <div className="form">
+                    <div className="field">
+                      <label>SKILL 源</label>
+                      <div className="chip-row">
+                        {(['provider', 'platform'] as const).map((value) => (
+                          <button
+                            key={`skill-${value}`}
+                            type="button"
+                            className={`chip${skillSource === value ? ' active' : ''}`}
+                            onClick={() => saveConfigSource('skill', value)}
+                          >
+                            {value === 'provider' ? '大模型网关' : 'AI能力平台'}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="field">
+                      <label>存储空间源</label>
+                      <div className="chip-row">
+                        {(['provider', 'platform'] as const).map((value) => (
+                          <button
+                            key={`cloud-${value}`}
+                            type="button"
+                            className={`chip${cloudSource === value ? ' active' : ''}`}
+                            onClick={() => saveConfigSource('cloud', value)}
+                          >
+                            {value === 'provider' ? '大模型网关' : 'AI能力平台'}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    {(skillSource === 'platform' || cloudSource === 'platform') &&
+                      !(assetBaseUrl.trim() && assetKey.trim() && assetSecret.trim()) && (
+                      <p className="settings-desc">使用 AI 能力平台来源前，请先完善上方平台配置</p>
+                    )}
                   </div>
                 </section>
                 </>
@@ -2807,6 +2888,14 @@ export default function App() {
                   ↻ 刷新
                 </button>
               </div>
+              {skillError && (
+                <div className="feature-banner error">
+                  <div>
+                    <strong>获取 Skill 清单失败</strong>
+                    <span>{skillError}</span>
+                  </div>
+                </div>
+              )}
               {skillCloseRequired && (
                 <div className="feature-banner">
                   <div>
@@ -2826,7 +2915,7 @@ export default function App() {
                     <div className="empty-icon">⚠️</div>
                     <div>{skillError}</div>
                     <div className="sub" style={{ marginTop: 8 }}>
-                      请确认当前应用支持 Skill 仓储，并且 Provider 已返回 OSS 配置。
+                      请确认当前应用支持 Skill 仓储，并且大模型网关已返回 OSS 配置。
                     </div>
                   </div>
                 ) : !skillCatalog?.skills.length ? (

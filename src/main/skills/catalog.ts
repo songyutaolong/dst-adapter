@@ -1,10 +1,12 @@
 import { createHash, createHmac } from 'crypto'
 import type {
+  RemoteConfigSource,
   RemoteSkillPackage,
   SkillCatalogResult,
   SkillRepositoryInfo
 } from '../../shared/types'
-import { getDstConnection } from '../store'
+import { fetchPlatformCloudDrives, type PlatformCloudDrive } from '../assets/platform'
+import { getDstConnection, getSettings } from '../store'
 import { ensureSkPrefix, toApiRoot } from '../../shared/url'
 import { compareVersions } from './version'
 
@@ -74,8 +76,8 @@ const CONFIG_ENDPOINT_PATH =
   process.env.DST_SKILL_REPOSITORY_CONFIG_PATH || '/api/skill-storage/config?provider=oss'
 const INDEX_OBJECT_NAME = 'index.json'
 
-let configCache: { value: SkillRepositoryConfig; expiresAt: number } | null = null
-let catalogCache: { value: SkillCatalogResult; expiresAt: number } | null = null
+const configCaches = new Map<RemoteConfigSource, { value: SkillRepositoryConfig; expiresAt: number }>()
+const catalogCaches = new Map<RemoteConfigSource, { value: SkillCatalogResult; expiresAt: number }>()
 
 function normalizePrefix(value: unknown): string {
   if (typeof value !== 'string') return ''
@@ -174,9 +176,71 @@ function parseRepositoryConfig(
   }
 }
 
-async function fetchRepositoryConfig(): Promise<SkillRepositoryConfig> {
-  if (configCache && configCache.expiresAt > Date.now()) return configCache.value
+async function fetchRepositoryConfig(force = false): Promise<SkillRepositoryConfig> {
+  const source: RemoteConfigSource = resolveSkillSource()
+  const cached = configCaches.get(source)
+  if (cached && cached.expiresAt > Date.now()) return cached.value
 
+  const config = source === 'platform'
+    ? await fetchPlatformSkillConfig(force)
+    : await fetchProviderSkillConfig()
+  configCaches.set(source, { value: config, expiresAt: Date.now() + CONFIG_CACHE_TTL_MS })
+  return config
+}
+
+function resolveSkillSource(): RemoteConfigSource {
+  return getSettings().skillConfigSource === 'platform' ? 'platform' : 'provider'
+}
+
+function regionFromCosEndpoint(endpoint: string): string | undefined {
+  const match = /cos\.([a-z0-9-]+)\.myqcloud\.com/i.exec(endpoint)
+  return match?.[1]?.toLowerCase()
+}
+
+function skillConfigFromPlatformDrive(drive: PlatformCloudDrive): SkillRepositoryConfig {
+  const provider = String(drive.provider || '').trim().toLowerCase() as SkillStorageProvider
+  if (provider !== 'oss' && provider !== 'cos') {
+    throw new Error(`AI 能力平台 Skill 仓储类型不是 OSS/COS：${drive.provider || '未知'}`)
+  }
+  const bucket = firstString(drive.bucket)
+  if (!bucket) throw new Error('AI 能力平台 Skill 仓储配置缺少 bucket')
+  const endpoint = firstString(drive.endpoint) || ''
+  if (provider === 'oss' && !endpoint) {
+    throw new Error('AI 能力平台 Skill 仓储配置缺少 OSS endpoint')
+  }
+  const region = provider === 'cos' ? regionFromCosEndpoint(endpoint) : undefined
+  if (provider === 'cos' && !region) {
+    throw new Error('AI 能力平台 Skill 仓储 COS 配置无法从 endpoint 解析 region')
+  }
+  const credentials: StorageCredentials = provider === 'cos'
+    ? {
+        secretId: firstString(drive.access_key),
+        secretKey: firstString(drive.secret_key)
+      }
+    : {
+        accessKeyId: firstString(drive.access_key),
+        accessKeySecret: firstString(drive.secret_key)
+      }
+  return {
+    provider,
+    bucket,
+    endpoint,
+    region,
+    pathPrefix: normalizePrefix(drive.path_prefix),
+    credentials
+  }
+}
+
+/** 从 AI 能力平台 cloud-drives 的 skill 云盘映射仓储配置。 */
+async function fetchPlatformSkillConfig(force = false): Promise<SkillRepositoryConfig> {
+  const { skill } = await fetchPlatformCloudDrives(force)
+  if (!skill) {
+    throw new Error('AI 能力平台未启用 Skill 仓储（cloud-drives skill 为空）')
+  }
+  return skillConfigFromPlatformDrive(skill)
+}
+
+async function fetchProviderSkillConfig(): Promise<SkillRepositoryConfig> {
   const connection = getDstConnection()
   if (!connection.apiKey.trim()) {
     throw new Error('未配置 API Key，请先在设置中填写 Provider Key')
@@ -211,7 +275,6 @@ async function fetchRepositoryConfig(): Promise<SkillRepositoryConfig> {
       }
 
       const config = parseRepositoryConfig(body.data, index === 0)
-      configCache = { value: config, expiresAt: Date.now() + CONFIG_CACHE_TTL_MS }
       return config
     } finally {
       clearTimeout(timer)
@@ -756,26 +819,29 @@ function mergeIndexedCatalog(
   }
 }
 
-function staleCatalog(error: unknown): SkillCatalogResult {
+function staleCatalog(source: RemoteConfigSource, error: unknown): SkillCatalogResult {
+  const cached = catalogCaches.get(source)
   return {
     ok: false,
     message: `获取 Skill 清单失败：${error instanceof Error ? error.message : String(error)}`,
-    skills: catalogCache?.value.skills || [],
-    repository: catalogCache?.value.repository,
-    generatedAt: catalogCache?.value.generatedAt,
-    fromCache: Boolean(catalogCache)
+    skills: cached?.value.skills || [],
+    repository: cached?.value.repository,
+    generatedAt: cached?.value.generatedAt,
+    fromCache: Boolean(cached)
   }
 }
 
-/** 使用 Provider Key 获取仓储配置，并用返回的临时凭据扫描 OSS/COS Skill 包。 */
+/** 按设置的配置来源获取仓储配置，并用返回的凭据扫描 OSS/COS Skill 包。 */
 export async function fetchSkillCatalog(force = false): Promise<SkillCatalogResult> {
-  if (!force && catalogCache && catalogCache.expiresAt > Date.now()) {
-    return { ...catalogCache.value, fromCache: true }
+  const source = resolveSkillSource()
+  const cachedCatalog = catalogCaches.get(source)
+  if (!force && cachedCatalog && cachedCatalog.expiresAt > Date.now()) {
+    return { ...cachedCatalog.value, fromCache: true }
   }
 
   try {
-    if (force) configCache = null
-    const config = await fetchRepositoryConfig()
+    if (force) configCaches.delete(source)
+    const config = await fetchRepositoryConfig(force)
     const objects = await listStorageObjects(config)
     let catalog = toCatalog(config, objects)
 
@@ -796,11 +862,11 @@ export async function fetchSkillCatalog(force = false): Promise<SkillCatalogResu
       }
     }
 
-    catalogCache = { value: catalog, expiresAt: Date.now() + CATALOG_CACHE_TTL_MS }
+    catalogCaches.set(source, { value: catalog, expiresAt: Date.now() + CATALOG_CACHE_TTL_MS })
     return catalog
   } catch (err) {
-    configCache = null
-    return staleCatalog(err)
+    configCaches.delete(source)
+    return staleCatalog(source, err)
   }
 }
 

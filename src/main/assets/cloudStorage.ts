@@ -1,5 +1,8 @@
 import { createHash, createHmac, randomUUID } from 'crypto'
 import path from 'path'
+import { getSettings } from '../store'
+import { fetchPlatformCloudDrives, type PlatformCloudDrive } from './platform'
+import type { RemoteConfigSource } from '../../shared/types'
 import { toApiRoot } from '../../shared/url'
 
 /**
@@ -16,7 +19,7 @@ import { toApiRoot } from '../../shared/url'
 export type CloudStorageProvider = 'cos' | 'oss'
 
 export interface CloudStorageConfig {
-  organization_id: number
+  organization_id?: number
   provider: CloudStorageProvider
   bucket: string
   region?: string
@@ -81,32 +84,89 @@ const CONFIG_CACHE_TTL_MS = 5 * 60 * 1000
 
 const configCache = new Map<string, { config: CloudStorageConfig; fetchedAt: number }>()
 
-function cacheKey(apiKey: string, provider?: CloudStorageProvider): string {
-  const hash = createHash('sha256').update(apiKey).digest('hex').slice(0, 16)
-  return `${hash}:${provider || 'default'}`
+function resolveCloudSource(): RemoteConfigSource {
+  return getSettings().cloudConfigSource === 'platform' ? 'platform' : 'provider'
+}
+
+function cacheKey(
+  source: RemoteConfigSource,
+  apiKey: string,
+  provider?: CloudStorageProvider
+): string {
+  const hash = createHash('sha256').update(apiKey || '-').digest('hex').slice(0, 16)
+  return `${source}:${hash}:${provider || 'default'}`
 }
 
 function invalidateConfig(apiKey: string, provider?: CloudStorageProvider): void {
-  configCache.delete(cacheKey(apiKey, provider))
+  configCache.delete(cacheKey(resolveCloudSource(), apiKey, provider))
 }
 
-/** 通过 Provider Key 读取所属组织的云存储配置（凭据只在内存中短暂使用；5 分钟缓存）。 */
+function regionFromCosEndpoint(endpoint: string): string | undefined {
+  const match = /cos\.([a-z0-9-]+)\.myqcloud\.com/i.exec(endpoint)
+  return match?.[1]?.toLowerCase()
+}
+
+function cloudConfigFromPlatformDrive(drive: PlatformCloudDrive): CloudStorageConfig {
+  const provider = drive.provider?.trim().toLowerCase()
+  if (provider !== 'cos' && provider !== 'oss') {
+    throw { code: -32603, message: 'AI 能力平台云空间类型不是 COS/OSS' }
+  }
+  const bucket = drive.bucket?.trim()
+  if (!bucket) {
+    throw { code: -32603, message: 'AI 能力平台云空间配置缺少 bucket' }
+  }
+  const endpoint = drive.endpoint?.trim() || ''
+  if (provider === 'oss' && !endpoint) {
+    throw { code: -32603, message: 'AI 能力平台云空间配置缺少 OSS endpoint' }
+  }
+  const accessKey = drive.access_key?.trim() || ''
+  const secretKey = drive.secret_key?.trim() || ''
+  const region = provider === 'cos' ? regionFromCosEndpoint(endpoint) : undefined
+  if (provider === 'cos' && !region) {
+    throw { code: -32603, message: 'AI 能力平台云空间 COS 配置无法从 endpoint 解析 region' }
+  }
+  const credentials = provider === 'cos'
+    ? { secret_id: accessKey, secret_key: secretKey }
+    : { access_key_id: accessKey, access_key_secret: secretKey }
+  return {
+    provider,
+    bucket,
+    region,
+    endpoint,
+    path_prefix: drive.path_prefix,
+    credentials
+  }
+}
+
+/** 按设置来源读取云存储配置（Provider 网关或 AI 能力平台；凭据只在内存中短暂使用）。 */
 export async function getCloudStorageConfig(
   baseUrl: string,
   apiKey: string,
   provider?: CloudStorageProvider,
   opts?: { noCache?: boolean }
 ): Promise<CloudStorageConfig> {
+  const source = resolveCloudSource()
+  const cacheId = cacheKey(source, apiKey.trim(), provider)
+  if (source === 'platform') {
+    const drives = await fetchPlatformCloudDrives(Boolean(opts?.noCache))
+    const drive = drives.ai_assets
+    if (!drive) {
+      throw { code: -32603, message: 'AI 能力平台未启用云空间（cloud-drives ai_assets 为空）' }
+    }
+    const config = cloudConfigFromPlatformDrive(drive)
+    if (provider && config.provider !== provider) {
+      throw {
+        code: -32603,
+        message: `AI 能力平台云空间类型为 ${config.provider.toUpperCase()}，与请求的 ${provider.toUpperCase()} 不一致`
+      }
+    }
+    configCache.set(cacheId, { config, fetchedAt: Date.now() })
+    return config
+  }
   const key = apiKey.trim()
   if (!key) {
     throw { code: -32603, message: '未配置 API Key，请在设置中填写后再请求' }
   }
-  const cacheId = cacheKey(key, provider)
-  const cached = configCache.get(cacheId)
-  if (!opts?.noCache && cached && Date.now() - cached.fetchedAt < CONFIG_CACHE_TTL_MS) {
-    return cached.config
-  }
-
   const query = provider ? `provider=${provider}` : ''
   const endpoint = `${toApiRoot(baseUrl)}/api/cloud-storage/config${query ? `?${query}` : ''}`
   const resp = await fetch(endpoint, {

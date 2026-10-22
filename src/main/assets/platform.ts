@@ -36,6 +36,47 @@ export function isPlatformConfigured(): boolean {
   return Boolean(conn.baseUrl && conn.key && conn.secret)
 }
 
+/** GET /api/v1/cloud-drives 返回的单个云盘 AK/SK 配置。 */
+export interface PlatformCloudDrive {
+  drive?: string
+  provider?: string
+  access_key?: string
+  secret_key?: string
+  bucket?: string
+  endpoint?: string
+  path_prefix?: string
+}
+
+export interface PlatformCloudDrives {
+  skill: PlatformCloudDrive | null
+  ai_assets: PlatformCloudDrive | null
+}
+
+const DRIVES_CACHE_TTL_MS = 5 * 60 * 1000
+let drivesCache: { value: PlatformCloudDrives; expiresAt: number } | null = null
+
+function toPlatformCloudDrive(value: unknown): PlatformCloudDrive | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  return value as PlatformCloudDrive
+}
+
+/** 读取平台云盘 AK/SK；skill 与 ai_assets 共用一次请求，5 分钟缓存。 */
+export async function fetchPlatformCloudDrives(force = false): Promise<PlatformCloudDrives> {
+  if (!force && drivesCache && Date.now() < drivesCache.expiresAt) {
+    return drivesCache.value
+  }
+  const { ok, status, body } = await platformRequest('GET', '/api/v1/cloud-drives')
+  if (!ok || !body) {
+    throw new Error(platformErrorMessage(body, '获取平台云盘配置失败', status))
+  }
+  const drives: PlatformCloudDrives = {
+    skill: toPlatformCloudDrive(body.skill),
+    ai_assets: toPlatformCloudDrive(body.ai_assets)
+  }
+  drivesCache = { value: drives, expiresAt: Date.now() + DRIVES_CACHE_TTL_MS }
+  return drives
+}
+
 /** 去尾斜杠的 API 根地址。 */
 function apiRoot(baseUrl: string): string {
   return baseUrl.replace(/\/+$/, '')
