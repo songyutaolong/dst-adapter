@@ -27,7 +27,7 @@ let mainWindow: BrowserWindow | null = null
 let pendingDeepLink: string | null = null
 
 // dev 模式下Electron 取 package.json name 作为应用名, 统一成产品名
-app.setName('Up software Ai控制台')
+app.setName('dst Ai控制台')
 
 async function maintainWorkBuddySkills(): Promise<void> {
   try {
@@ -113,7 +113,7 @@ function createWindow(): void {
     minWidth: 800,
     minHeight: 560,
     show: false,
-    title: 'Up software Ai控制台',
+    title: 'dst Ai控制台',
     ...(icon ? { icon } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),

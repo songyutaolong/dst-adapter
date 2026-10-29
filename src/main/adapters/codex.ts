@@ -184,7 +184,7 @@ function catalogEntry(
     slug,
     // display_name 直接用模型 ID：模型选择器里应显示模型名而非 provider 名
     display_name: displayName,
-    description: `${displayName}（通过 Up software Ai控制台）`,
+    description: `${displayName}（通过 dst Ai控制台）`,
     default_reasoning_level: 'medium',
     supported_reasoning_levels: [
       { effort: 'low', description: '快速' },

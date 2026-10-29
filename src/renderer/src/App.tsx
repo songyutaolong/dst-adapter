@@ -3031,7 +3031,7 @@ export default function App() {
           )}
 
           <p className="footer-note">
-            Up software Ai控制台 v{version || '…'} · 本地数据目录：{dataDir || '...'}
+            dst Ai控制台 v{version || '…'} · 本地数据目录：{dataDir || '...'}
             （备份在 backups/ 下）
           </p>
         </main>
